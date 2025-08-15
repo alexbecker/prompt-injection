@@ -125,13 +125,13 @@ sophisticated attacks.
 More recent approaches introduce logical separation between the trusted and untrusted inputs in the network.
 
 - *Structured Queries (StruQ)* adds a dedicated delimiter token that splits a query into `⟨prompt⟩` and `⟨data⟩` channels; fine‑tuning with contrastive pairs cuts manual jailbreak success on Llama-7B and Mistral-7B to $<2%$ and significantly reduces the effectiveness of several adversarial methods @Chen2025StruQ.
-- *SecAlign* constructs a preference‑optimisation dataset where "secure" completions obey the system prompt and "insecure" ones follow the injected instruction; RLHF on this dataset drives the success rate of six canonical attacks to $<10%$ on Llama-3-8B-Instruct without harming AlpacaEval scores @secalign2025.
+- *SecAlign* constructs a preference‑optimization dataset where "secure" completions obey the system prompt and "insecure" ones follow the injected instruction; RLHF on this dataset drives the success rate of six canonical attacks to $<10%$ on Llama-3-8B-Instruct without harming AlpacaEval scores @secalign2025.
 - *Instructional Segment Embedding (ISE)* introduces a three‑way segment embedding (`system` / `user` / `data`); fine-tuning Llama‑2‑7B with ISE improves accuracy against the *Structured Query* benchmark by ≈15.8 pp and boosts ordinary instruction‑following by ≈4 pp @ise2025.
 - *PICO* proposes a dual‑channel transformer: system tokens pass through one stack, user tokens through another; gated fusion happens only after the final attention block @pico2025. This approach has not yet been tested.
 
 == Capability‑based Isolation
 
-Other work has focused on minimizing the harm a successful prompt injection has performed by requiring user approval for any dangerous action.
+Other work has focused on minimizing the harm a successful prompt injection can cause by requiring user approval for any dangerous action.
 The *Dual LLM* pattern proposed by Willison in 2023 pipes the output of an "untrusted" assistant model into a second, policy‑enforcing model that rewrites or refuses unsafe text @willison2023dualllm. While effective against direct prompt injections, it remains vulnerable if the second model blindly trusts the first model’s output and so can still relay hidden adversarial payloads @camel2025 @willison2025camel.
 
 Google DeepMind’s *CaMeL* (Capabilities for Machine Learning) hardens this idea by isolating untrusted input inside a "Quarantined LLM" that has no tool‑calling rights, then passing only a verified, least‑privilege representation to a "Privileged LLM". CaMeL solves 67% of tasks on the AgentDojo benchmark with formal security guarantees and addresses the vulnerability found in Dual LLM @camel2025.
@@ -194,17 +194,18 @@ Our definition will assume several choices, which will be described in the exper
 - a *null rule* sequence $(x'_r, dots.h, x'_R)$, and the corresponding $x'$ defined by substituting this sequence for $(x_r, dots.h, x_R)$ in $x$
 - a positive integer $j <= L - ell$ of output tokens to consider
 
+We will work primarily in the embedding space to allow linear combinations.
 We let $e$, $underline(e)$ and $e'$ refer to the images of each of these sequences under the embedding map.
 
 == Definitions
 
-We use the log-likelihood of the first $j$ output tokens as a score function:
+We use the log-likelihood of the first $j$ output token embeddings as a score function:
 
-$ F(e) = sum_(t=ell)^(ell+j-1) log p_theta (x_t divides e) $
+$ F(e) = sum_(t=ell)^(ell+j-1) log p_theta (e_t divides e) $
 
 We define the Integrated Gradient of $F$ with respect to the $i$th token as
 
-$ op("IG")_(i)(x) = (e_i - underline(e)_i) dot.circle integral_0^1  (partial F(underline(e) + alpha (e - underline(e)))) / (partial e_i) d alpha $
+$ op("IG")_(i)(x) = (e_i - underline(e)_i) dot.circle integral_0^1(partial F(underline(e) + alpha (e - underline(e)))) / (partial e_i) d alpha $
 
 As usual, we approximate the integral with a Riemann sum over $n$ steps, with $n$ chosen experimentally.
 
@@ -319,7 +320,9 @@ This occurred at $n=192$ for Llama models, $n=256$ for Qwen3-8B and $n=512$ for 
 To evaluate how well $op("AD")$ discriminates between malicious prompts which successfully bypass the rule and benign prompts,
 we restrict our attention to the "successful" malicious prompts with $p("Unable") < 0.5$ and compute the
 average precision of a binary classifier using $op("AD")$.
-The score distribution for each rule was shifted by subtracting the median and scaled to a standard deviation of 1.
+Since system prompts (and hence rules) are generally fixed in deployed systems, we baseline each rule
+against the benign prompts and shift and scale the score distribution so that it is centered at 0 with standard deviation 1.
+
 To avoid Simpson's paradox, we weight each sample so that the positive samples
 (i.e. successful malicious prompts) for each rule have the same total weight and do the same for negative samples.
 This results in a chance level slightly below $0.5$ as some rules have no positive samples.
@@ -421,8 +424,9 @@ Furthermore, it has the following limitations:
 
 However, because this method does not rely on any training data, it should be complementary to any fine-tuning method,
 allowing the combined detector to perform better.
-This may be as large as a 20% improvement in recall with minimal precision tradeoff for the Llama and Qwen3 models studied here,
-or larger if precision tradeoff is acceptable.
+
+Our analysis assumes that classifiers are calibrated for the system prompt, which complicates the process of deploying system prompt updates.
+Selecting a threshold independent of system prompt is possible but will decrease accuracy.
 
 Practical applications may also be limited by compute and VRAM requirements.
 Computing the Riemann sum with $n$ steps costs slightly more than generating $n$ tokens, and this method requires doing so twice per prompt.
@@ -532,7 +536,7 @@ and that we treat `\b` as the literal 2-character string but `\n` as a newline.
 = Attack Success Rates
 
 Not all attacks are effective against all models.
-To evaluate effectiveness, we first baseline $p("Unable")$ for malicious prompts on each model, and the define $Delta p("Unable")$
+To evaluate effectiveness, we first baseline $p("Unable")$ for malicious prompts on each model, and then define $Delta p("Unable")$
 for each (model, rule, prompt, attack) tuple by subtracting $p("Unable")$ with the attack applied.
 Positive values indicate the attack made refusal less likely.
 

@@ -431,10 +431,10 @@ def robustness_check(*, n_iters, response_len):
             formatted_prompt = template_row["User Template"].format(user=prompt)
             barely_benign.loc[index, col] = refusal_prob(template_row["System Template"], rule, formatted_prompt)
 
-            #_run_attack(barely_benign_attack, [benign_prompt], template_row, response_len, n_iters, 1)
+            _run_attack(barely_benign_attack, [benign_prompt], template_row, response_len, n_iters, 1)
 
     barely_benign.to_csv("barely_benign_prompts.csv", index=False)
-    #save_df()
+    save_df()
 
 
 def validate_convergence(response_len):
