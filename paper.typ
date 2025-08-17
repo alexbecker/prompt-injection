@@ -86,15 +86,21 @@ We use the term prompt injection here to refer to the aforementioned narrower cl
 
 Most LLMs used in agents and applications have been tuned with reinforcement learning to use a chat template which includes distinct
 _system prompt_ and _user prompt_ portions and to prioritize instructions in the system prompt,
-and official advice from major labs such as OpenAI is for application and agent authors to provide instructions there.
+and official advice from major labs such as OpenAI is for application and agent authors to provide instructions there @openai2025prompting.
 This is conceptually similar to how most SQL libraries allow application authors to specify query templates separately from values which may come from the user.
 However, the system prompt/user prompt separation does not offer the same guarantee that proper use of SQL libraries does.
-The LLM has been trained via reinforcement learning to prioritize system prompts over user inputs, but the persistence of prompt injection vulnerabilities
+Some LLMs are trained via reinforcement learning to prioritize system prompts over user inputs, but the persistence of prompt injection vulnerabilities
 shows that this is not sufficiently reliable.
 
 Unlike many problems with current LLMs, prompt injection is not expected to be solved as a side-effect of creating more generally capable LLMs.
 In fact, the very ability of more capable LLMs to follow more complex instructions means that they will be vulnerable to more complex attacks.
 This makes prompt injection a clear target for dedicated research.
+
+The prompt injection problem has been studied in 2 different settings. _Indirect prompt injection_ assumes that a trusted user provides instructions to the LLM
+and then feeds it untrusted data, and the goal of defenses is to prevent any instructions in the data portion from being acted on.
+_Direct prompt injection_ goes further, assuming that instructions from an untrusted user should be followed, unless they conflict with instructions from the system author.
+In realistic multi-turn or agent settings, it is necessary to handle the direct prompt injection problem because previous LLM outputs contain further
+instructions for the LLM to follow but are necessarily tainted by untrusted input.
 
 We focus on a particular class of system prompts for ease of analysis: those that attempt to enforce a _rule_ which will reject certain user prompts.
 We call the prompts the rules are intended to reject _malicious prompts_.
@@ -105,29 +111,33 @@ a list of transactions balance debits and credits can be converted into the rule
 
 = Related Work
 
-Prior research has pursued several lines of inquiry, which we will survey.
-Most research has focused on either training a separate model to filter malicious prompts,
-or on modifying and fine-tuning the target model to be more resistant to prompt injection.
-There has been little prior research on mechanistic detection of prompt injection attacks within the target model.
+Broadly speaking, prior work on prompt injection defenses can be divided into detection, model hardening, and capability-based isolation.
+We briefly survey these approaches and discuss how applicable they are to our 
+Note that this survey is not exhaustive.
 
-== Dedicated Detection Models
+== Detection
+
+Detection methods tend to work for both direct and indirect prompt injections, at least as benchmarked in the literature, because the attack methods and objectives typically tested
+in both settings have high overlap.
+However, we will see in our analysis that this does not perfectly transfer when attack objectives are changed to fit the direct prompt injection scenario.
+
+=== Dedicated Models
 
 Early defenses leverage off‑the‑shelf text‑classification models.  
 LLM Guard‑v2 fine‑tunes DeBERTa‑v3 on a composite dataset of known attacks and benign prompts and reports $F_1 approx 0.95$ on its held‑out split @llmguardv2.
 Subsequent work shows that shallow classifiers operating wholly in embedding space also reach competitive accuracy while remaining lightweight for on‑device use @ayub2024embedding.
-More recent approaches such as *Multi‑Agent NLP Framework* have leveraged multiple LLMs in token space to sanitize queries and enforce policies @gosmar2025multiagent.
 
-These detectors and sanitizers are attractive because they require no model changes, but they are generally expected to perform poorly against novel and more
-sophisticated attacks.
+== Model Hardening
 
-== Model‑centric Defenses
+More recent approaches introduce logical separation between the trusted and untrusted inputs in the network and fine-tuning the LLM to treat them differently.
+*Structured Queries (StruQ)* adds a dedicated delimiter token that splits a query into `⟨prompt⟩` and `⟨data⟩` channels; fine‑tuning with contrastive pairs cuts manual jailbreak success on Llama-7B and Mistral-7B to $<2%$ and significantly reduces the effectiveness of several adversarial methods @Chen2025StruQ.
+*SecAlign* builds on this work using a preference‑optimization dataset where "secure" completions obey the system prompt and "insecure" ones follow the injected instruction; RLHF on this dataset drives the success rate of six canonical attacks to $<10%$ on Llama-3-8B-Instruct without harming AlpacaEval scores @secalign2025.
 
-More recent approaches introduce logical separation between the trusted and untrusted inputs in the network.
-
-- *Structured Queries (StruQ)* adds a dedicated delimiter token that splits a query into `⟨prompt⟩` and `⟨data⟩` channels; fine‑tuning with contrastive pairs cuts manual jailbreak success on Llama-7B and Mistral-7B to $<2%$ and significantly reduces the effectiveness of several adversarial methods @Chen2025StruQ.
-- *SecAlign* constructs a preference‑optimization dataset where "secure" completions obey the system prompt and "insecure" ones follow the injected instruction; RLHF on this dataset drives the success rate of six canonical attacks to $<10%$ on Llama-3-8B-Instruct without harming AlpacaEval scores @secalign2025.
-- *Instructional Segment Embedding (ISE)* introduces a three‑way segment embedding (`system` / `user` / `data`); fine-tuning Llama‑2‑7B with ISE improves accuracy against the *Structured Query* benchmark by ≈15.8 pp and boosts ordinary instruction‑following by ≈4 pp @ise2025.
-- *PICO* proposes a dual‑channel transformer: system tokens pass through one stack, user tokens through another; gated fusion happens only after the final attention block @pico2025. This approach has not yet been tested.
+Both StruQ and SecAlign focus on indirect prompt injection.
+Direct prompt injection hardening was first attempted by OpenAI, which introduced the *Instruction Hierarchy* dataset containing conflicting sytem, user and tool content,
+and fine-tuned GPT-3.5 on it to respect their precedence rules @wallace2024instructionhierarchy.
+*Instructional Segment Embedding (ISE)* introduces a three‑way segment embedding (`system` / `user` / `data`) deals with both direct and indirect prompt injection attacks.
+Fine-tuning Llama‑2‑7B with ISE improves its performance on both the Instruction Hierarchy dataset and StruQ's indirect prompt injection benchmark @ise2025.
 
 == Capability‑based Isolation
 
@@ -214,7 +224,7 @@ $a_i = bold(1)^top op("IG")_(i)(x)$ by summing over the embedding dimensions,
 which gives the sequence $a = (a_(u), dots.h, a_U)$ of gradient attributions on each token in the user prompt.
 Similarly, we define $a'$ using the null-ruled $x'$ in place of $x$.
 
-For detecting attacks, we define the *attribution distance* with output length $j$ is then defined as
+Finally, we define the *attribution distance* with output length $j$ as
 $ op("AD")(x) = norm( a - a')_2 $
 furthermore, we define the *$k$-smoothed attribution distance* as
 $ op("AD")^((k))(x) = norm(macron(a)^((k)) - overline(a')^((k)))_2 $
