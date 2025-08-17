@@ -4,7 +4,7 @@ from collections import defaultdict
 import torch
 import pandas as pd
 import numpy as np
-from captum.attr import LayerIntegratedGradients
+from captum.attr import LayerIntegratedGradients, IntegratedGradients
 from datasets import load_dataset
 from dotenv import load_dotenv
 from functools import lru_cache
@@ -263,24 +263,36 @@ def compute_attr(template, rule, prompt, response, n_steps=args.steps, debug=Fal
     baseline_ids[:, user_start:user_end] = padding_tok
     baseline_ids[:, output_start:output_end] = padding_tok
 
-    def forward_fn(ids):
+    # --- work in embedding space ---
+    emb_layer = model.get_input_embeddings()  # same as model.model.embed_tokens
+    input_emb = emb_layer(input_ids)  # (B, L, H)
+    baseline_emb_token = emb_layer(baseline_ids)  # (B, L, H)
+
+    # interpolate the baseline in embedding space between current baseline and original input
+    mix_alpha = 0.1  # 0.0 -> input_emb, 1.0 -> baseline_emb_token
+    baseline_emb = mix_alpha * baseline_emb_token + (1.0 - mix_alpha) * input_emb
+
+    def forward_fn(emb):
         nonlocal debug
-        logits = model(ids).logits.float().log_softmax(-1)
+        # Run the model with precomputed embeddings
+        logits = model(inputs_embeds=emb).logits.float().log_softmax(-1)
         preds = logits[:, output_start - 1: output_end - 1, :]
         labels = input_ids.expand(logits.size(0), -1)[:, output_start : output_end]
         if debug:
             print("forward:", tokens[output_start:output_end])
             debug = False
+        # token-level log-prob of the gold labels
         return preds.gather(-1, labels.unsqueeze(-1)).squeeze(-1).sum(dim=1)
 
-    ig = LayerIntegratedGradients(forward_fn, model.model.embed_tokens)
-    attr_emb = ig.attribute(
-        inputs=input_ids,
-        baselines=baseline_ids,
+    # Integrated Gradients on the input embedding tensor
+    ig = IntegratedGradients(forward_fn)
+    attr = ig.attribute(
+        inputs=input_emb,  # path end
+        baselines=baseline_emb,  # path start (interpolated baseline in embedding space)
         n_steps=n_steps,
         internal_batch_size=args.batch_size,
     ) # (1, L, hidden)
-    attr = attr_emb[0].sum(-1).detach()    # collapse (1, L, hidden) -> (L, hidden) -> (L,)
+    attr = attr[0].sum(-1).detach()    # collapse (1, L, hidden) -> (L, hidden) -> (L,)
 
     return tokens[user_start:user_end], attr[user_start:user_end].tolist()
 
@@ -486,7 +498,7 @@ if __name__ == "__main__":
         (templates_and_rules[rule_refusal_prob_col] > 0.5) & (templates_and_rules[null_rule_refusal_prob_col] < 0.1)
     ]
     print(f"Filtered templates_and_rules to {len(templates_and_rules)} rows")
-    injection_success_rates()
+    #injection_success_rates()
     for rl in args.response_len:
         validate_convergence(response_len=rl)
         analyze_attacks(response_len=rl, n_iters=args.iters)
