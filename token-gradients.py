@@ -33,6 +33,7 @@ parser.add_argument("--checkpoint-interval", type=int, default=5)
 parser.add_argument("--response-len", type=int, default=[3], nargs="+")
 parser.add_argument("--iters", type=int, default=3)
 parser.add_argument("--benign-texts", type=int, default=50)
+parser.add_argument("--alpha", type=float, default=0.1)
 parser.add_argument("--output-path", default="prompt_injections.parquet")
 args = parser.parse_args()
 refusal = "Unable"
@@ -269,8 +270,7 @@ def compute_attr(template, rule, prompt, response, n_steps=args.steps, debug=Fal
     baseline_emb_token = emb_layer(baseline_ids)  # (B, L, H)
 
     # interpolate the baseline in embedding space between current baseline and original input
-    mix_alpha = 0.1  # 0.0 -> input_emb, 1.0 -> baseline_emb_token
-    baseline_emb = mix_alpha * baseline_emb_token + (1.0 - mix_alpha) * input_emb
+    baseline_emb = args.alpha * baseline_emb_token + (1.0 - args.alpha) * input_emb
 
     def forward_fn(emb):
         nonlocal debug
