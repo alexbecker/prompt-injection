@@ -77,8 +77,8 @@ Specifically, organizations and individuals deploying LLMs will need to be able 
 and trust that whatever other non-privileged input the LLM is fed by others will not cause it to ignore these instructions.
 This is particularly necessary for deploying LLMs as agents, which must be able to take autonomous actions.
 
-_Prompt injection_---a term coined by Willison in 2022 as an analogy to SQL injections @willison2022 after Goodside’s public demonstration against GPT-3 @goodside2022
-but previously reported privately to OpenAI @cefalu2022 ---refers to a loosely-defined collection of techniques used to
+_Prompt injection_---a term coined by Willison in 2022 as an analogy to SQL injections @willison2022
+after the first public demonstration against GPT-3 @goodside2022 @cefalu2022 ---refers to a loosely-defined collection of techniques used to
 trigger an LLM to ignore or modify instructions provided by the author of an LLM-based agent or application.
 The term _jailbreak_ is sometimes used interchangeably, but often refers to a broader class of techniques used to elicit other classes of undesirable behavior
 such as providing instructions for law-breaking activities.
@@ -89,21 +89,22 @@ _system prompt_ and _user prompt_ portions and to prioritize instructions in the
 and official advice from major labs such as OpenAI is for application and agent authors to provide instructions there @openai2025prompting.
 This is conceptually similar to how most SQL libraries allow application authors to specify query templates separately from values which may come from the user.
 However, the system prompt/user prompt separation does not offer the same guarantee that proper use of SQL libraries does.
-Some LLMs are trained via reinforcement learning to prioritize system prompts over user inputs, but the persistence of prompt injection vulnerabilities
-shows that this is not sufficiently reliable.
 
-Unlike many problems with current LLMs, prompt injection is not expected to be solved as a side-effect of creating more generally capable LLMs.
-In fact, the very ability of more capable LLMs to follow more complex instructions means that they will be vulnerable to more complex attacks.
-This makes prompt injection a clear target for dedicated research.
+Prompt injection defenses have been developed which have reasonable success in the _indirect prompt injection_ setting,
+which assumes inputs are partitioned into trusted instructions and untrusted data.
+However, this assumption cannot hold in any situation where prior model outputs (which are tainted by untrusted input)
+are expected to provide instructions---which includes reasoning models, multi-turn conversations and agents.
+These use cases require us to handle the more general problem of _direct prompt injection_,
+creating separate user and system roles and assuming that instructions from the user or from previous LLM output should be
+followed unless they conflict with instructions from the system role.
+Furthermore, many prompt injection defenses have historically assumed that prompt injection attacks obfuscate instructions that are
+objectively malicious, while agent authors expect to be able to enforce system policies (e.g. restrictions on spending money)
+which preclude actions that in other contexts may be desirable.
 
-The prompt injection problem has been studied in 2 different settings. _Indirect prompt injection_ assumes that a trusted user provides instructions to the LLM
-and then feeds it untrusted data, and the goal of defenses is to prevent any instructions in the data portion from being acted on.
-_Direct prompt injection_ goes further, assuming that instructions from an untrusted user should be followed, unless they conflict with instructions from the system author.
-In realistic multi-turn or agent settings, it is necessary to handle the direct prompt injection problem because previous LLM outputs contain further
-instructions for the LLM to follow but are necessarily tainted by untrusted input.
-
-We focus on a particular class of system prompts for ease of analysis: those that attempt to enforce a _rule_ which will reject certain user prompts.
-We call the prompts the rules are intended to reject _malicious prompts_.
+While some work has been done to make models handle conflicts between instructions with different privelege levels,
+evaluating the success of this work requires making very subjective judgements.
+We instead focus on detecting _malicious prompts_---clear-cut violations of rules agent authors wish an LLM to enforce---leaving
+the responsibility on the harness to determine how to handle these rejections (e.g. by automatically rewriting and retrying a query).
 This eliminates any ambiguity about what it means for a rule to be enforced, allowing us to ignore malicious prompts which are handled correctly
 and focus on distinguishing between benign prompts and successful prompt injections.
 While this may appear to be a major restriction, many practical requirements can be realized in this format---for example, the requirement that
