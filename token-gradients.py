@@ -1,10 +1,11 @@
 import argparse
+import random
 from collections import defaultdict
 
 import torch
 import pandas as pd
 import numpy as np
-from captum.attr import LayerIntegratedGradients, IntegratedGradients
+from captum.attr import IntegratedGradients
 from datasets import load_dataset
 from dotenv import load_dotenv
 from functools import lru_cache
@@ -29,14 +30,30 @@ parser.add_argument(
 )
 parser.add_argument("--batch-size", type=int, default=2)
 parser.add_argument("--steps", type=int, default=128)
-parser.add_argument("--checkpoint-interval", type=int, default=5)
+parser.add_argument("--checkpoint-interval", type=int, default=10)
 parser.add_argument("--response-len", type=int, default=[3], nargs="+")
 parser.add_argument("--iters", type=int, default=3)
 parser.add_argument("--benign-texts", type=int, default=50)
 parser.add_argument("--alpha", type=float, default=0.1)
-parser.add_argument("--output-path", default="prompt_injections.parquet")
+parser.add_argument("--output-path", default="attributions.parquet")
+parser.add_argument("--responses-path", default="responses.parquet")
+parser.add_argument("--refusal-probs", default=False, action="store_true")
+parser.add_argument("--generate-responses", default=False, action="store_true")
+parser.add_argument("--compute-attrs", default=False, action="store_true")
 args = parser.parse_args()
 refusal = "Unable"
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(0)
 
 
 ## Datasets
@@ -46,8 +63,10 @@ template_rows_by_rule = {
 }
 rule_refusal_prob_col = f"{args.model_id} - rule_refusal_prob"
 null_rule_refusal_prob_col = f"{args.model_id} - null_rule_refusal_prob"
-attacks = pd.read_csv("attacks.csv")
-attacks["Template"] = attacks["Template"].apply(lambda s: s.replace("\\n", "\n"))
+attack_templates = {
+    attack["Name"]: attack["Template"].replace("\\n", "\n")
+    for _, attack in pd.read_csv("attacks.csv").iterrows()
+}
 # NOTE: the dataset is gated; needs HF_TOKEN in .env
 ds = load_dataset("qualifire/Qualifire-prompt-injection-benchmark", split="test")
 benign_split = ds.filter(lambda row: row["label"] == "benign")
@@ -92,50 +111,20 @@ else:
     raise NotImplementedError()
 
 
-## Resume past run
-def load_existing():
-    existing = defaultdict(list)
-    key_cols = [
-        "model",
-        "template",
-        "rule",
-        "prompt",
-        "attack",
-        "n_steps",
-        "response_len",
-    ]
-    value_cols = [
-        "response",
-        "user_rule_attr",
-        "user_null_rule_attr",
-    ]
-    try:
-        old_df = pd.read_parquet(args.output_path)[[
-            *key_cols,
-            *value_cols,
-        ]]
-    except FileNotFoundError:
-        return existing
-    for _, row in old_df.iterrows():
-        key = tuple(row[col] for col in key_cols)
-        value = {col: row[col] for col in key_cols + value_cols}
-        existing[key].append(value)
-    return existing
+def save_df(df_records, output_path):
+    records_list = [v for vs in df_records.values() for v in vs]
+    pd.DataFrame.from_records(records_list).to_parquet(output_path)
 
 
-records = load_existing()
+def make_user_prompt(row, prompt, attack):
+    formatted_attack = attack_templates[attack].format(prompt=prompt, refusal=refusal)
+    return row["User Template"].format(user=formatted_attack)
 
 
-def save_df():
-    records_list = [v for vs in records.values() for v in vs]
-    pd.DataFrame.from_records(records_list).to_parquet(args.output_path)
-
-
-## Functions
-def generate(template, rule, prompt, response_len, temperature=0.1):
+def generate(row, rule, prompt, attack, response_len, temperature=0.1):
     messages = [
-        {"role": "system", "content": template.format(rule=rule, refusal=refusal)},
-        {"role": "user", "content": prompt},
+        {"role": "system", "content": row["System Template"].format(rule=rule, refusal=refusal)},
+        {"role": "user", "content": make_user_prompt(row, prompt, attack)},
     ]
     text = tokenizer.apply_chat_template(
         messages,
@@ -162,11 +151,11 @@ def check_refused(response):
     return any(substr in response for substr in refusals)
 
 
-def generate_k(template, rule, prompt, response_len, k, existing=None, max_attempts=20):
+def generate_k(row, rule, prompt, attack, response_len, k, existing=None, max_attempts=20):
     generated = existing or set()
     temperature = 0
     for _ in range(max_attempts):
-        new = generate(template, rule, prompt, response_len, temperature=temperature)
+        new = generate(row, rule, prompt, attack, response_len, temperature)
         if check_refused(new):
             continue
         if new not in generated:
@@ -175,6 +164,84 @@ def generate_k(template, rule, prompt, response_len, k, existing=None, max_attem
             if len(generated) >= k:
                 return
         temperature += (1 - temperature) / 10
+
+
+def _generate_responses(response_records, slice_name, row, attack, prompts, response_len, starting_position, n_iters=args.iters):
+    null_rule = row["Null Rule"] or get_null_rule(row["Rule"])
+    for prompt in tqdm(prompts, desc="Prompts", position=starting_position, leave=False):
+        key_dict = {
+            "slice": slice_name,
+            "model": args.model_id,
+            "template": row["System Template"],
+            "rule": row["Rule"],
+            "prompt": prompt,
+            "attack": attack,
+            "response_len": response_len,
+        }
+        key = tuple(key_dict.values())
+        matches = response_records[key]
+        k = n_iters - len(matches)
+        if k <= 0:
+            continue
+
+        responses = generate_k(
+            row=row,
+            rule=null_rule,
+            prompt=prompt,
+            attack=attack,
+            response_len=response_len,
+            k=k
+        )
+        for response in tqdm(responses, total=k, desc="Responses", position=starting_position+1, leave=False):
+            response_records[key].append({
+                **key_dict,
+                "response": response,
+            })
+
+            if len(response_records) % args.checkpoint_interval == 0:
+                save_df(response_records, args.responses_path)
+
+
+def generate_responses(min_len=30, max_len=60):
+    response_records = defaultdict(list)
+    value_cols = ["responses"]
+    try:
+        old_df = pd.read_parquet(args.responses_path)
+    except FileNotFoundError:
+        pass
+    else:
+        for _, row in old_df.iterrows():
+            key = tuple(row[col] for col in row if col not in value_cols)
+            response_records[key].append(dict(row))
+
+    for response_len in tqdm(args.response_len, desc="Response Lengths", leave=False):
+        # Benign
+        # Filter to length [min_len, max_len] to have a similar distribution to the attacks
+        benign_prompts = []
+        for text in benign_split["text"]:
+            tokens = tokenizer([text])["input_ids"][0]
+            if min_len <= len(tokens) <= max_len:
+                benign_prompts.append(text)
+            if len(benign_prompts) >= args.benign_texts:
+                break
+
+        for _, row in tqdm_df(templates_and_rules, desc="Benign", position=1):
+            _generate_responses(response_records, "Benign", row, "Naive", benign_prompts, response_len, 2)
+
+        # Malicious
+        for _, row in tqdm_df(templates_and_rules, desc="Malicious", position=1):
+            for attack in tqdm(attack_templates, desc=row["Rule"][:15], position=2, leave=False):
+                prompts = malicious_prompts[(row["System Template"], row["Rule"])]
+                _generate_responses(response_records, "Malicious", row, attack, prompts, response_len, 3)
+
+        # Barely Benign (for robustness check)
+        barely_benign = pd.read_csv("barely_benign_prompts.csv")
+        for index, (rule, benign_prompt, *_) in tqdm_df(barely_benign, desc="Robustness", position=1):
+            row = template_rows_by_rule[rule]
+            # Hard-code more samples for barely benign since we have few prompts
+            _generate_responses(response_records, "Barely Benign", row, "Naive", [benign_prompt], response_len, 3)
+
+    save_df(response_records, args.responses_path)
 
 
 def refusal_prob(template, rule, prompt):
@@ -349,86 +416,53 @@ def get_null_rule(rule):
     return null_rule
 
 
-def test_attack(row, prompt, attack, response):
-    prompt = row["User Template"].format(user=prompt)
-    formatted_attack = attack["Template"].format(prompt=prompt, refusal=refusal)
+def make_attributions_df():
+    records_df = pd.read_parquet(args.responses_path)
+    df = records_df[
+        (records_df["model"] == args.model_id) & records_df["response_len"].isin(args.response_len)
+    ].copy()
+    df["alpha"] = args.alpha
+    df["n_steps"] = args.steps
+    df["batch_size"] = args.batch_size
 
-    user_tokens, rule_attrs = compute_attr(row["System Template"], row["Rule"], formatted_attack, response)
+    try:
+        existing_df = pd.read_parquet(args.output_path)
+        df = df.merge(existing_df, on=list(df.columns), how="outer")
+    except FileNotFoundError:
+        df["user_rule_attr"] = np.nan
+        df["user_rule_attr"] = df["user_rule_attr"].astype(object)
+        df["user_null_rule_attr"] = np.nan
+        df["user_null_rule_attr"] = df["user_null_rule_attr"].astype(object)
 
-    null_rule = row["Null Rule"] or get_null_rule(row["Rule"])
-    _, null_rule_attrs = compute_attr(row["System Template"], null_rule, formatted_attack, response)
-
-    return {
-        "response": response,
-        "user_rule_attr": rule_attrs,
-        "user_null_rule_attr": null_rule_attrs,
-    }
-
-
-def _run_attack(attack, prompts, row, response_len, n_iters, starting_position):
-    null_rule = row["Null Rule"] or get_null_rule(row["Rule"])
-    for prompt in tqdm(prompts, desc="Prompts", position=starting_position, leave=False):
-        key_dict = {
-            "model": args.model_id,
-            "template": row["System Template"],
-            "rule": row["Rule"],
-            "prompt": prompt,
-            "attack": attack["Name"],
-            "n_steps": args.steps,
-            "response_len": response_len,
-        }
-        key = tuple(key_dict.values())
-        matches = records[key]
-        k = n_iters - len(matches)
-        if k <= 0:
-            continue
-
-        responses = generate_k(
-            template=row["System Template"],
-            rule=null_rule,
-            prompt=row["User Template"].format(user=prompt),
-            response_len=response_len,
-            k=k
+    df_slice = df[
+        (df["model"] == args.model_id)
+        & df["response_len"].isin(args.response_len)
+        & (df["alpha"] == args.alpha)
+        & (df["n_steps"] == args.steps)
+        & (df["batch_size"] == args.batch_size)
+        & df["user_rule_attr"].isna()
+        & df["user_null_rule_attr"].isna()
+    ]
+    for i, (index, row) in enumerate(tqdm_df(df_slice, desc="Attributions")):
+        template_row = template_rows_by_rule[row["rule"]]
+        formatted_attack = attack_templates[row["attack"]].format(prompt=row["prompt"], refusal=refusal)
+        user_tokens, rule_attr = compute_attr(
+            template_row["System Template"], template_row["Rule"], formatted_attack, row["response"]
         )
-        for response in tqdm(responses, total=k, desc="Iters", position=starting_position+1, leave=False):
-            records[key].append({
-                **key_dict,
-                **test_attack(row, prompt, attack, response),
-            })
+        df.at[index, "user_rule_attr"] = tuple(rule_attr)
 
-            if len(records) % args.checkpoint_interval == 0:
-                save_df()
+        null_rule = template_row["Null Rule"] or get_null_rule(template_row["Rule"])
+        _, null_rule_attr = compute_attr(template_row["System Template"], null_rule, formatted_attack, row["response"])
+        df.at[index, "user_null_rule_attr"] = tuple(null_rule_attr)
 
+        if i % args.checkpoint_interval == 0:
+            df.to_parquet(args.output_path, index=False)
 
-def analyze_attacks(*, response_len, n_iters):
-    for _, row in tqdm_df(templates_and_rules, desc=f"Malicious L={response_len}", position=0):
-        for _, attack in tqdm_df(attacks, desc=row["Rule"][:15], position=1, leave=False):
-            prompts = malicious_prompts[(row["System Template"], row["Rule"])]
-            _run_attack(attack, prompts, row, response_len, n_iters, 2)
-
-    save_df()
+    df.to_parquet(args.output_path, index=False)
 
 
-def analyze_benign(*, n_texts, n_iters, min_len, max_len, response_len):
-    # Filter to length [min_len, max_len] to have a similar distribution to the attacks
-    benign_prompts = []
-    for text in benign_split["text"]:
-        tokens = tokenizer([text])["input_ids"][0]
-        if min_len <= len(tokens) <= max_len:
-            benign_prompts.append(text)
-        if len(benign_prompts) >= n_texts:
-            break
-
-    benign_attack = {"Name": "Benign", "Template": "{prompt}"}
-    for _, row in tqdm_df(templates_and_rules, desc=f"Benign L={response_len}", position=0):
-        _run_attack(benign_attack, benign_prompts, row, response_len, n_iters, 1)
-
-    save_df()
-
-
-def robustness_check(*, n_iters, response_len):
+def barely_benign_refusal_probs():
     barely_benign = pd.read_csv("barely_benign_prompts.csv")
-    barely_benign_attack = {"Name": "Barely Benign", "Template": "{prompt}"}
 
     benign_p_refusal_col = f"{args.model_id} - benign_refusal_prob"
     malicious_p_refusal_col = f"{args.model_id} - malicious_refusal_prob"
@@ -437,16 +471,13 @@ def robustness_check(*, n_iters, response_len):
     if malicious_p_refusal_col not in barely_benign:
         barely_benign[malicious_p_refusal_col] = 0.0
 
-    for index, (rule, benign_prompt, malicious_prompt, *_) in tqdm_df(barely_benign, desc="Robustness", position=0):
+    for index, (rule, benign_prompt, malicious_prompt, *_) in tqdm_df(barely_benign, desc="Barely Benign Refusal Probs", position=0):
         template_row = template_rows_by_rule[rule]
         for prompt, col in [(benign_prompt, benign_p_refusal_col), (malicious_prompt, malicious_p_refusal_col)]:
             formatted_prompt = template_row["User Template"].format(user=prompt)
             barely_benign.loc[index, col] = refusal_prob(template_row["System Template"], rule, formatted_prompt)
 
-            _run_attack(barely_benign_attack, [benign_prompt], template_row, response_len, n_iters, 1)
-
     barely_benign.to_csv("barely_benign_prompts.csv", index=False)
-    save_df()
 
 
 def validate_convergence(response_len):
@@ -455,7 +486,7 @@ def validate_convergence(response_len):
     malicious_prompt = malicious_prompts[(row["System Template"], row["Rule"])][0]
     for prompt, name in [(benign_prompt, "benign"), (malicious_prompt, "malicious")]:
         null_rule = row["Null Rule"] or get_null_rule(row["Rule"])
-        response = generate(row["System Template"], null_rule, prompt, response_len)
+        response = generate(row, null_rule, prompt, "Naive", response_len, temperature=0)
         user_tokens, run_1 = compute_attr(row["System Template"], row["Rule"], prompt, response, debug=True)
         _, run_2 = compute_attr(row["System Template"], row["Rule"], prompt, response, n_steps=2 * args.steps)
         dist = euclidean(run_1, run_2)
@@ -467,17 +498,16 @@ def injection_success_rates():
     success_records = []
     for _, row in tqdm_df(templates_and_rules, desc="Injection Success", position=0):
         prompts = malicious_prompts[(row["System Template"], row["Rule"])]
-        for _, attack in tqdm_df(attacks, desc=row["Rule"][:15], position=1, leave=False):
+        for attack in tqdm(attack_templates, desc=row["Rule"][:15], position=1, leave=False):
             for prompt in tqdm(prompts, desc="Prompts", position=2, leave=False):
-                formatted_prompt = row["User Template"].format(user=prompt)
-                formatted_attack = attack["Template"].format(prompt=formatted_prompt, refusal=refusal)
-                p_refusal = refusal_prob(row["System Template"], row["Rule"], formatted_attack)
+                formatted_prompt = make_user_prompt(row, prompt, attack)
+                p_refusal = refusal_prob(row["System Template"], row["Rule"], formatted_prompt)
 
                 success_records.append({
                     "model": args.model_id,
                     "template": row["System Template"],
                     "rule": row["Rule"],
-                    "attack": attack["Name"],
+                    "attack": attack,
                     "prompt": prompt,
                     "p_refusal": p_refusal,
                 })
@@ -498,10 +528,12 @@ if __name__ == "__main__":
         (templates_and_rules[rule_refusal_prob_col] > 0.5) & (templates_and_rules[null_rule_refusal_prob_col] < 0.1)
     ]
     print(f"Filtered templates_and_rules to {len(templates_and_rules)} rows")
-    #injection_success_rates()
-    for rl in args.response_len:
-        validate_convergence(response_len=rl)
-        analyze_attacks(response_len=rl, n_iters=args.iters)
-        analyze_benign(response_len=rl, n_iters=args.iters, n_texts=args.benign_texts, min_len=30, max_len=60)
-        # Hard-code more samples for near-malicious since we have few prompts
-        robustness_check(response_len=rl, n_iters=5)
+    if args.refusal_probs:
+        injection_success_rates()
+        barely_benign_refusal_probs()
+    if args.generate_responses:
+        generate_responses()
+    if args.compute_attrs:
+        #for rl in args.response_len:
+        #    validate_convergence(response_len=rl)
+        make_attributions_df()
