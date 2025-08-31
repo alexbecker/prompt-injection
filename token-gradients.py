@@ -1,6 +1,7 @@
 import argparse
 import random
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import pandas as pd
@@ -29,8 +30,7 @@ parser.add_argument(
     ],
 )
 parser.add_argument("--batch-size", type=int, default=2)
-parser.add_argument("--steps", type=int, default=128)
-parser.add_argument("--checkpoint-interval", type=int, default=10)
+parser.add_argument("--start-steps", type=int, default=32)
 parser.add_argument("--response-len", type=int, default=[3], nargs="+")
 parser.add_argument("--iters", type=int, default=3)
 parser.add_argument("--benign-texts", type=int, default=50)
@@ -40,6 +40,7 @@ parser.add_argument("--responses-path", default="responses.parquet")
 parser.add_argument("--refusal-probs", default=False, action="store_true")
 parser.add_argument("--generate-responses", default=False, action="store_true")
 parser.add_argument("--compute-attrs", default=False, action="store_true")
+parser.add_argument("--convergence-target", type=float, default=0.01)
 args = parser.parse_args()
 refusal = "Unable"
 
@@ -56,45 +57,25 @@ def set_seed(seed):
 set_seed(0)
 
 
-## Datasets
-templates_and_rules = pd.read_csv("templates_and_rules.csv", na_values=[], keep_default_na=False)
-template_rows_by_rule = {
-    row["Rule"]: row for _, row in templates_and_rules.iterrows()
-}
-rule_refusal_prob_col = f"{args.model_id} - rule_refusal_prob"
-null_rule_refusal_prob_col = f"{args.model_id} - null_rule_refusal_prob"
-attack_templates = {
-    attack["Name"]: attack["Template"].replace("\\n", "\n")
-    for _, attack in pd.read_csv("attacks.csv").iterrows()
-}
-# NOTE: the dataset is gated; needs HF_TOKEN in .env
-ds = load_dataset("qualifire/Qualifire-prompt-injection-benchmark", split="test")
-benign_split = ds.filter(lambda row: row["label"] == "benign")
-
-
-def load_malicious_prompts():
-    result = defaultdict(list)
-    for _, row in pd.read_csv("malicious_prompts.csv").iterrows():
-        result[(row["Template"], row["Rule"])].append(row["Prompt"])
-    for _, row in templates_and_rules.iterrows():
-        assert result[(row["System Template"], row["Rule"])], row
-    return result
-
-
-malicious_prompts = load_malicious_prompts()
-
-
 ## Model and tokenizer
-model = AutoModelForCausalLM.from_pretrained(
-    args.model_id,
-    device_map="auto",
-    torch_dtype=torch.bfloat16,
-    trust_remote_code=True,
-)
-#model.gradient_checkpointing_enable()  # Comment out if you have enough memory
-model.eval()
-model.requires_grad_(False)
-input_device = model.get_input_embeddings().weight.device
+# Get number of available GPUs
+n_gpus = torch.cuda.device_count()
+print(f"Using {n_gpus} GPUs")
+
+# Create models for each GPU
+models = {}
+for gpu_id in range(n_gpus):
+    models[gpu_id] = AutoModelForCausalLM.from_pretrained(
+        args.model_id,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+    ).to(f"cuda:{gpu_id}")
+    models[gpu_id].eval()
+    models[gpu_id].requires_grad_(False)
+
+# Use the first model as default for single-GPU functions
+model = models[0]
+input_device = f"cuda:0"
 tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
 padding_tok = tokenizer.convert_tokens_to_ids("_")
 if "llama" in args.model_id:
@@ -111,9 +92,44 @@ else:
     raise NotImplementedError()
 
 
-def save_df(df_records, output_path):
-    records_list = [v for vs in df_records.values() for v in vs]
-    pd.DataFrame.from_records(records_list).to_parquet(output_path)
+## Datasets
+templates_and_rules = pd.read_csv("templates_and_rules.csv", na_values=[], keep_default_na=False)
+template_rows_by_rule = {
+    row["Rule"]: row for _, row in templates_and_rules.iterrows()
+}
+rule_refusal_prob_col = f"{args.model_id} - rule_refusal_prob"
+null_rule_refusal_prob_col = f"{args.model_id} - null_rule_refusal_prob"
+attack_templates = {
+    attack["Name"]: attack["Template"].replace("\\n", "\n")
+    for _, attack in pd.read_csv("attacks.csv").iterrows()
+}
+
+def load_benign_prompts(min_len=30, max_len=60):
+    # NOTE: the dataset is gated; needs HF_TOKEN in .env
+    ds = load_dataset("qualifire/Qualifire-prompt-injection-benchmark", split="test")
+    benign_split = ds.filter(lambda row: row["label"] == "benign")
+    results = []
+    # Filter to length [min_len, max_len] to have a similar distribution to the attacks
+    for text in benign_split["text"]:
+        tokens = tokenizer([text])["input_ids"][0]
+        if min_len <= len(tokens) <= max_len:
+            results.append(text)
+        if len(results) >= args.benign_texts:
+            return results
+    raise Exception(f"Only found {len(results)}/{args.benign_texts} benign prompts meeting the criteria")
+
+
+def load_malicious_prompts():
+    result = defaultdict(list)
+    for _, row in pd.read_csv("malicious_prompts.csv").iterrows():
+        result[(row["Template"], row["Rule"])].append(row["Prompt"])
+    for _, row in templates_and_rules.iterrows():
+        assert result[(row["System Template"], row["Rule"])], row
+    return result
+
+
+benign_prompts = load_benign_prompts()
+malicious_prompts = load_malicious_prompts()
 
 
 def make_user_prompt(row, prompt, attack):
@@ -121,7 +137,7 @@ def make_user_prompt(row, prompt, attack):
     return row["User Template"].format(user=formatted_attack)
 
 
-def generate(row, rule, prompt, attack, response_len, temperature=0.1):
+def generate(row, rule, prompt, attack, response_len, temperature=0.1, gpu_id=0):
     messages = [
         {"role": "system", "content": row["System Template"].format(rule=rule, refusal=refusal)},
         {"role": "user", "content": make_user_prompt(row, prompt, attack)},
@@ -132,10 +148,15 @@ def generate(row, rule, prompt, attack, response_len, temperature=0.1):
         add_generation_prompt=True,
         enable_thinking=False,
     )
-    inputs = tokenizer([text], return_tensors="pt").to(input_device)
+    
+    # Use appropriate model and device
+    device = f"cuda:{gpu_id}"
+    model_to_use = models[gpu_id]
+    
+    inputs = tokenizer([text], return_tensors="pt").to(device)
 
     with torch.no_grad():
-        output = model.generate(
+        output = model_to_use.generate(
             **inputs,
             pad_token_id=tokenizer.eos_token_id,
             max_new_tokens=response_len,
@@ -151,11 +172,11 @@ def check_refused(response):
     return any(substr in response for substr in refusals)
 
 
-def generate_k(row, rule, prompt, attack, response_len, k, existing=None, max_attempts=20):
+def generate_k(row, rule, prompt, attack, response_len, k, existing=None, max_attempts=20, gpu_id=0):
     generated = existing or set()
     temperature = 0
     for _ in range(max_attempts):
-        new = generate(row, rule, prompt, attack, response_len, temperature)
+        new = generate(row, rule, prompt, attack, response_len, temperature, gpu_id=gpu_id)
         if check_refused(new):
             continue
         if new not in generated:
@@ -166,9 +187,45 @@ def generate_k(row, rule, prompt, attack, response_len, k, existing=None, max_at
         temperature += (1 - temperature) / 10
 
 
-def _generate_responses(response_records, slice_name, row, attack, prompts, response_len, starting_position, n_iters=args.iters):
+def _generate_responses_worker(args_tuple):
+    """Worker function for parallel processing"""
+    slice_name, row, attack, prompts_batch, response_len, gpu_id, n_iters = args_tuple
     null_rule = row["Null Rule"] or get_null_rule(row["Rule"])
-    for prompt in tqdm(prompts, desc="Prompts", position=starting_position, leave=False):
+    batch_records = defaultdict(list)
+    
+    for prompt in prompts_batch:
+        key_dict = {
+            "slice": slice_name,
+            "model": args.model_id,
+            "template": row["System Template"],
+            "rule": row["Rule"],
+            "prompt": prompt,
+            "attack": attack,
+            "response_len": response_len,
+        }
+        key = tuple(key_dict.values())
+        
+        responses = generate_k(
+            row=row,
+            rule=null_rule,
+            prompt=prompt,
+            attack=attack,
+            response_len=response_len,
+            k=n_iters,
+            gpu_id=gpu_id
+        )
+        for response in responses:
+            batch_records[key].append({
+                **key_dict,
+                "response": response,
+            })
+    
+    return batch_records
+
+def _generate_responses(response_records, slice_name, row, attack, prompts, response_len, starting_position, n_iters=args.iters):
+    # Filter prompts that need processing
+    prompts_to_process = []
+    for prompt in prompts:
         key_dict = {
             "slice": slice_name,
             "model": args.model_id,
@@ -181,25 +238,38 @@ def _generate_responses(response_records, slice_name, row, attack, prompts, resp
         key = tuple(key_dict.values())
         matches = response_records[key]
         k = n_iters - len(matches)
-        if k <= 0:
-            continue
-
-        responses = generate_k(
-            row=row,
-            rule=null_rule,
-            prompt=prompt,
-            attack=attack,
-            response_len=response_len,
-            k=k
-        )
-        for response in tqdm(responses, total=k, desc="Responses", position=starting_position+1, leave=False):
-            response_records[key].append({
-                **key_dict,
-                "response": response,
-            })
-
-            if len(response_records) % args.checkpoint_interval == 0:
-                save_df(response_records, args.responses_path)
+        if k > 0:
+            prompts_to_process.append(prompt)
+    
+    if not prompts_to_process:
+        return
+    
+    # Distribute prompts across GPUs
+    prompt_batches = [[] for _ in range(n_gpus)]
+    for i, prompt in enumerate(prompts_to_process):
+        prompt_batches[i % n_gpus].append(prompt)
+    
+    # Prepare arguments for parallel processing
+    worker_args = [
+        (slice_name, row, attack, batch, response_len, gpu_id, n_iters)
+        for gpu_id, batch in enumerate(prompt_batches)
+        if batch
+    ]
+    
+    # Process in parallel
+    with ThreadPoolExecutor(max_workers=n_gpus) as executor:
+        results = list(tqdm(
+            executor.map(_generate_responses_worker, worker_args),
+            total=len(worker_args),
+            desc="GPU batches",
+            position=starting_position,
+            leave=False
+        ))
+    
+    # Merge results
+    for batch_records in results:
+        for key, records in batch_records.items():
+            response_records[key].extend(records)
 
 
 def generate_responses(min_len=30, max_len=60):
@@ -211,20 +281,11 @@ def generate_responses(min_len=30, max_len=60):
         pass
     else:
         for _, row in old_df.iterrows():
-            key = tuple(row[col] for col in row if col not in value_cols)
+            key = tuple(row[col] for col in row.index if col not in value_cols)
             response_records[key].append(dict(row))
 
     for response_len in tqdm(args.response_len, desc="Response Lengths", leave=False):
         # Benign
-        # Filter to length [min_len, max_len] to have a similar distribution to the attacks
-        benign_prompts = []
-        for text in benign_split["text"]:
-            tokens = tokenizer([text])["input_ids"][0]
-            if min_len <= len(tokens) <= max_len:
-                benign_prompts.append(text)
-            if len(benign_prompts) >= args.benign_texts:
-                break
-
         for _, row in tqdm_df(templates_and_rules, desc="Benign", position=1):
             _generate_responses(response_records, "Benign", row, "Naive", benign_prompts, response_len, 2)
 
@@ -241,7 +302,8 @@ def generate_responses(min_len=30, max_len=60):
             # Hard-code more samples for barely benign since we have few prompts
             _generate_responses(response_records, "Barely Benign", row, "Naive", [benign_prompt], response_len, 3)
 
-    save_df(response_records, args.responses_path)
+    records_list = [v for vs in response_records.values() for v in vs]
+    pd.DataFrame.from_records(records_list).to_parquet(args.responses_path)
 
 
 def refusal_prob(template, rule, prompt):
@@ -274,7 +336,7 @@ def refusal_prob(template, rule, prompt):
 
 
 @lru_cache(maxsize=100)
-def compute_attr(template, rule, prompt, response, n_steps=args.steps, debug=False):
+def compute_attr(template, rule, prompt, response, n_steps, debug=False, gpu_id=0):
     messages = [
         {"role": "system", "content": template.format(rule=rule, refusal=refusal)},
         {"role": "user", "content": prompt},
@@ -300,12 +362,16 @@ def compute_attr(template, rule, prompt, response, n_steps=args.steps, debug=Fal
     assert split_points[0] > 0, user_start_str
     assert split_points[2] > 0, assistant_start_str
 
+    # Use appropriate device based on gpu_id
+    device = f"cuda:{gpu_id}"
+    model_to_use = models[gpu_id]
+    
     splits = [text[start:end] for start, end in zip([0, *split_points], [*split_points, len(text)])]
     split_input_ids = [
         tokenizer([seg], return_tensors="pt")["input_ids"][0][
             # Cut off the start-of-sequence tokens after the first split
             (1 if has_start_of_sequence else 0):
-        ].to(input_device)
+        ].to(device)
         for i, seg in enumerate(splits)
     ]
     offsets = [0]
@@ -332,7 +398,7 @@ def compute_attr(template, rule, prompt, response, n_steps=args.steps, debug=Fal
     baseline_ids[:, output_start:output_end] = padding_tok
 
     # --- work in embedding space ---
-    emb_layer = model.get_input_embeddings()  # same as model.model.embed_tokens
+    emb_layer = model_to_use.get_input_embeddings()  # same as model.model.embed_tokens
     input_emb = emb_layer(input_ids)  # (B, L, H)
     baseline_emb_token = emb_layer(baseline_ids)  # (B, L, H)
 
@@ -342,7 +408,7 @@ def compute_attr(template, rule, prompt, response, n_steps=args.steps, debug=Fal
     def forward_fn(emb):
         nonlocal debug
         # Run the model with precomputed embeddings
-        logits = model(inputs_embeds=emb).logits.float().log_softmax(-1)
+        logits = model_to_use(inputs_embeds=emb).logits.float().log_softmax(-1)
         preds = logits[:, output_start - 1: output_end - 1, :]
         labels = input_ids.expand(logits.size(0), -1)[:, output_start : output_end]
         if debug:
@@ -416,13 +482,39 @@ def get_null_rule(rule):
     return null_rule
 
 
-def make_attributions_df():
+def _compute_attr_worker(args_tuple):
+    """Worker function for parallel attribution computation"""
+    rows_batch, n_steps, gpu_id = args_tuple
+    results = []
+    
+    for index, row in tqdm(rows_batch, desc=f"Attributions GPU={gpu_id}", position=gpu_id):
+        template_row = template_rows_by_rule[row["rule"]]
+        formatted_attack = attack_templates[row["attack"]].format(prompt=row["prompt"], refusal=refusal)
+        
+        user_tokens, rule_attr = compute_attr(
+            template_row["System Template"], template_row["Rule"], formatted_attack, row["response"],
+            n_steps=n_steps,
+            gpu_id=gpu_id
+        )
+        
+        null_rule = template_row["Null Rule"] or get_null_rule(template_row["Rule"])
+        _, null_rule_attr = compute_attr(
+            template_row["System Template"], null_rule, formatted_attack, row["response"],
+            n_steps=n_steps,
+            gpu_id=gpu_id
+        )
+        
+        results.append((index, tuple(rule_attr), tuple(null_rule_attr)))
+    
+    return results
+
+def make_attributions_df(n_steps):
     records_df = pd.read_parquet(args.responses_path)
     df = records_df[
         (records_df["model"] == args.model_id) & records_df["response_len"].isin(args.response_len)
     ].copy()
     df["alpha"] = args.alpha
-    df["n_steps"] = args.steps
+    df["n_steps"] = n_steps
     df["batch_size"] = args.batch_size
 
     try:
@@ -438,26 +530,39 @@ def make_attributions_df():
         (df["model"] == args.model_id)
         & df["response_len"].isin(args.response_len)
         & (df["alpha"] == args.alpha)
-        & (df["n_steps"] == args.steps)
+        & (df["n_steps"] == n_steps)
         & (df["batch_size"] == args.batch_size)
         & df["user_rule_attr"].isna()
         & df["user_null_rule_attr"].isna()
     ]
-    for i, (index, row) in enumerate(tqdm_df(df_slice, desc="Attributions")):
-        template_row = template_rows_by_rule[row["rule"]]
-        formatted_attack = attack_templates[row["attack"]].format(prompt=row["prompt"], refusal=refusal)
-        user_tokens, rule_attr = compute_attr(
-            template_row["System Template"], template_row["Rule"], formatted_attack, row["response"]
-        )
-        df.at[index, "user_rule_attr"] = tuple(rule_attr)
-
-        null_rule = template_row["Null Rule"] or get_null_rule(template_row["Rule"])
-        _, null_rule_attr = compute_attr(template_row["System Template"], null_rule, formatted_attack, row["response"])
-        df.at[index, "user_null_rule_attr"] = tuple(null_rule_attr)
-
-        if i % args.checkpoint_interval == 0:
-            df.to_parquet(args.output_path, index=False)
-
+    
+    if len(df_slice) == 0:
+        df.to_parquet(args.output_path, index=False)
+        return
+    
+    # Split rows across GPUs
+    rows_list = list(df_slice.iterrows())
+    row_batches = [[] for _ in range(n_gpus)]
+    for i, row_tuple in enumerate(rows_list):
+        row_batches[i % n_gpus].append(row_tuple)
+    
+    # Prepare arguments for parallel processing
+    worker_args = [
+        (batch, n_steps, gpu_id)
+        for gpu_id, batch in enumerate(row_batches)
+        if batch
+    ]
+    
+    # Process in parallel
+    with ThreadPoolExecutor(max_workers=n_gpus) as executor:
+        all_results = list(executor.map(_compute_attr_worker, worker_args))
+    
+    # Merge results
+    for batch_results in all_results:
+        for index, rule_attr, null_rule_attr in batch_results:
+            df.at[index, "user_rule_attr"] = rule_attr
+            df.at[index, "user_null_rule_attr"] = null_rule_attr
+            
     df.to_parquet(args.output_path, index=False)
 
 
@@ -480,18 +585,33 @@ def barely_benign_refusal_probs():
     barely_benign.to_csv("barely_benign_prompts.csv", index=False)
 
 
-def validate_convergence(response_len):
+def select_n_steps(response_len, test_cases=5):
     row = templates_and_rules.iloc[0]
-    benign_prompt = "Write a short explanation of addition."
-    malicious_prompt = malicious_prompts[(row["System Template"], row["Rule"])][0]
-    for prompt, name in [(benign_prompt, "benign"), (malicious_prompt, "malicious")]:
-        null_rule = row["Null Rule"] or get_null_rule(row["Rule"])
-        response = generate(row, null_rule, prompt, "Naive", response_len, temperature=0)
-        user_tokens, run_1 = compute_attr(row["System Template"], row["Rule"], prompt, response, debug=True)
-        _, run_2 = compute_attr(row["System Template"], row["Rule"], prompt, response, n_steps=2 * args.steps)
-        dist = euclidean(run_1, run_2)
-        scale_factor = norm(run_1) + norm(run_2)
-        print(f"Validation dist ({name}): {dist / scale_factor}")
+    benign = benign_prompts[:test_cases]
+    # Should have 3 test cases for the first row
+    malicious = malicious_prompts[(row["System Template"], row["Rule"])]
+    n = args.start_steps
+    max_interval = 64
+    while n <= 512:
+        errs = []
+        for i, prompt in enumerate(tqdm(benign + malicious, desc=f"Trying n={n}")):
+            null_rule = row["Null Rule"] or get_null_rule(row["Rule"])
+            response = generate(row, null_rule, prompt, "Naive", response_len)
+            user_tokens, run_1 = compute_attr(
+                row["System Template"], row["Rule"], prompt, response, n_steps=n,
+                # Only show a debug message the very first time
+                debug=i == 0 and n == args.start_steps,
+            )
+            _, run_2 = compute_attr(row["System Template"], row["Rule"], prompt, response, n_steps=2 * n)
+            dist = euclidean(run_1, run_2)
+            scale_factor = norm(run_1) + norm(run_2)
+            errs.append(dist / scale_factor)
+        err = np.max(errs)
+        if err < args.convergence_target:
+            print(f"Error @ n={n}: {err} is less than target")
+            return n
+        print(f"Error @ n={n}: {err} is greater than target")
+        n += min(n, max_interval)
 
 
 def injection_success_rates():
@@ -534,6 +654,5 @@ if __name__ == "__main__":
     if args.generate_responses:
         generate_responses()
     if args.compute_attrs:
-        #for rl in args.response_len:
-        #    validate_convergence(response_len=rl)
-        make_attributions_df()
+        chosen_n_steps = max(select_n_steps(rl) for rl in args.response_len)
+        make_attributions_df(chosen_n_steps)
