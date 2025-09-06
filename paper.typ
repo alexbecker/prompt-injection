@@ -5,15 +5,16 @@
     font: "TeX Gyre Termes",
     weight: 700,
     tracking: 0pt,
-  )[Detecting Prompt Injections with Integrated Gradients],
+  )[Detecting Prompt Injections with Contrastive Per-Token Attributions],
   authors: (( name: "Alex Becker" ),),
   abstract: [
 Modern LLMs are often given rules to follow via a trusted system prompt and then fed untrusted user prompts.
 However, malicious user prompts are frequently able to bypass these rules using techniques known as prompt injections.
-Defenses against these attacks have primarily focused on fine-tuning models to recognize them.
-These defenses work well on existing attacks but are expected to be vulnerable to novel attacks.
-We propose a novel metric for detecting prompt injections based on mechanistic interpretation techniques
-rather than fine-tuning, which should complement existing approaches and generalize to novel attacks.
+Existing defenses against prompt injection generally depend on fine-tuning models using datasets of known attacks,
+making them vulnerable to unknown attacks.
+We propose a novel metric for detecting direct prompt injection attacks using per-token attributions rather than fine-tuning.
+This metric outperforms existing training-free methods on a majority of models tested and is the first to
+require no example attacks to calibrate.
 Code & data: #link("https://github.com/alexbecker/prompt-injection")[github.com/alexbecker/prompt-injection]
   ]
 )
@@ -72,10 +73,10 @@ Code & data: #link("https://github.com/alexbecker/prompt-injection")[github.com/
 
 = Introduction
 
-If LLMs are to reach their full potential, we will need them to be able to handle untrusted input safely and reliably.
+If LLMs are to reach their full potential, they will need to handle untrusted input safely and reliably.
 Specifically, organizations and individuals deploying LLMs will need to be able to specify what the LLM should and should not do,
 and trust that whatever other non-privileged input the LLM is fed by others will not cause it to ignore these instructions.
-This is particularly necessary for deploying LLMs as agents, which must be able to take autonomous actions.
+This is particularly important when deploying LLMs as agents, which must be able to take autonomous actions.
 
 _Prompt injection_---a term coined by Willison in 2022 as an analogy to SQL injections @willison2022
 after the first public demonstration against GPT-3 @goodside2022 @cefalu2022 ---refers to a loosely-defined collection of techniques used to
@@ -101,32 +102,48 @@ Furthermore, many prompt injection defenses have historically assumed that promp
 objectively malicious, while agent authors expect to be able to enforce system policies (e.g. restrictions on spending money)
 which preclude actions that in other contexts may be desirable.
 
-While some work has been done to make models handle conflicts between instructions with different privelege levels,
-evaluating the success of this work requires making very subjective judgements.
-We instead focus on detecting _malicious prompts_---clear-cut violations of rules agent authors wish an LLM to enforce---leaving
+While some work has been done to make models handle conflicts between instructions with different privilege levels,
+evaluating the success of this work requires making very subjective judgments.
+We instead focus on detecting clear-cut violations of rules agent authors wish an LLM to enforce, leaving
 the responsibility on the harness to determine how to handle these rejections (e.g. by automatically rewriting and retrying a query).
 This eliminates any ambiguity about what it means for a rule to be enforced, allowing us to ignore malicious prompts which are handled correctly
 and focus on distinguishing between benign prompts and successful prompt injections.
 While this may appear to be a major restriction, many practical requirements can be realized in this format---for example, the requirement that
 a list of transactions balance debits and credits can be converted into the rule "reject attempts to generate a list of transactions that is not balanced".
 
+Since we are interested in causal analysis of prompt injections, we restrict our attention to _successful_ prompt injections.
+This means we consider not only the user input but the generated response, since the generated response defines whether the prompt injection is successful.
+
 = Related Work
 
 Broadly speaking, prior work on prompt injection defenses can be divided into detection, model hardening, and capability-based isolation.
-We briefly survey these approaches and discuss how applicable they are to our 
-Note that this survey is not exhaustive.
+We briefly survey these approaches and discuss how applicable they are to our to our scenario.
 
 == Detection
 
-Detection methods tend to work for both direct and indirect prompt injections, at least as benchmarked in the literature, because the attack methods and objectives typically tested
-in both settings have high overlap.
-However, we will see in our analysis that this does not perfectly transfer when attack objectives are changed to fit the direct prompt injection scenario.
+Detection methods tend to work for both direct and indirect prompt injections, at least as benchmarked in the literature,
+because the attack methods and objectives typically tested in both settings have high overlap.
+However, we will see in our analysis that this does not necessarily transfer when attack objectives are changed to fit the direct prompt injection scenario.
 
-=== Dedicated Models
+Most defenses leverage off‑the‑shelf text‑classification models.  
+An early example is *LLM Guard‑v2*, which fine‑tunes DeBERTa‑v3 on a composite dataset of known attacks and benign prompts
+and reports $F_1 approx 0.95$ on its held‑out split @llmguardv2.
+*Sentinel* fine-tunes a ModernBERT-large classifier on a more diverse corpus, reporting achieving nearly 100% accuracy on older benchmarks
+and $F_1 approx 0.98$ on its unseen test set @ivry2025sentinel.
+*DataSentinel* achieves similar benchmark results but better robustness against adaptive attacks by formulating detection as a minimax game
+against adaptive attackers, alternating gradient-based attack generation with detector training @liu2025datasentinel.
 
-Early defenses leverage off‑the‑shelf text‑classification models.  
-LLM Guard‑v2 fine‑tunes DeBERTa‑v3 on a composite dataset of known attacks and benign prompts and reports $F_1 approx 0.95$ on its held‑out split @llmguardv2.
-Subsequent work shows that shallow classifiers operating wholly in embedding space also reach competitive accuracy while remaining lightweight for on‑device use @ayub2024embedding.
+To our knowledge, there is little previous training-free work focused on detecting prompt injections.
+*Attention Tracker* experimentally identifies attention heads whose last-token attention drops most when subject to a prompt injection attack.
+Averaging attention across these heads to detect prompt injection outperforms Prompt Guard on several common model families and datasets,
+but is vulnerable to adversarial methods @hung2025attention.
+Although this approach is training-free, it still requires calibration using a small set of known attacks to identify important attention heads.
+
+There is also prior work for using gradients to detect safety policy violations, which is similar to our work though not focused specifically on prompt injections.
+*GradSafe* computes the cosine similarity between the gradient of "safety‑critical" parameters and a reference vector @xie2024gradsafe.
+*Gradient Cuff* considers the gradient of the probability of a refusal response @hu2024gradientcuff-neurips.
+*Token Highlighter* builds on this concept by identifying the tokens with the largest such gradient and "soft removing" other tokens by scaling the embeddings
+down @hu2025tokenhighlighter.
 
 == Model Hardening
 
@@ -135,10 +152,15 @@ More recent approaches introduce logical separation between the trusted and untr
 *SecAlign* builds on this work using a preference‑optimization dataset where "secure" completions obey the system prompt and "insecure" ones follow the injected instruction; RLHF on this dataset drives the success rate of six canonical attacks to $<10%$ on Llama-3-8B-Instruct without harming AlpacaEval scores @secalign2025.
 
 Both StruQ and SecAlign focus on indirect prompt injection.
-Direct prompt injection hardening was first attempted by OpenAI, which introduced the *Instruction Hierarchy* dataset containing conflicting sytem, user and tool content,
-and fine-tuned GPT-3.5 on it to respect their precedence rules @wallace2024instructionhierarchy.
-*Instructional Segment Embedding (ISE)* introduces a three‑way segment embedding (`system` / `user` / `data`) deals with both direct and indirect prompt injection attacks.
-Fine-tuning Llama‑2‑7B with ISE improves its performance on both the Instruction Hierarchy dataset and StruQ's indirect prompt injection benchmark @ise2025.
+Direct prompt injection hardening was first attempted by OpenAI, which introduced the *Instruction Hierarchy* dataset containing conflicting system,
+user and tool content, and fine-tuned GPT-3.5 on it to respect their precedence rules @wallace2024instructionhierarchy.
+*Instructional Segment Embedding (ISE)* introduces a four‑way segment embedding (`system`, `user`, `data`, `response`)
+which handles both direct and indirect prompt injection attacks.
+Fine-tuning Llama‑2‑7B with ISE improves its performance on both the Instruction Hierarchy dataset and StruQ's indirect prompt injection benchmark @ise2025,
+but does not achieve parity with SecAlign on indirect prompt injection.
+
+To our knowledge, the only training-free hardening method is *Attention Sharpening*, which builds on the insights of the Attention Tracker detection method
+by adjusting attention normalization to prevent what it calls "Attention Slipping" in the critical attention heads @hu2025attentionslipping.
 
 == Capability‑based Isolation
 
@@ -147,51 +169,25 @@ The *Dual LLM* pattern proposed by Willison in 2023 pipes the output of an "
 
 Google DeepMind’s *CaMeL* (Capabilities for Machine Learning) hardens this idea by isolating untrusted input inside a "Quarantined LLM" that has no tool‑calling rights, then passing only a verified, least‑privilege representation to a "Privileged LLM". CaMeL solves 67% of tasks on the AgentDojo benchmark with formal security guarantees and addresses the vulnerability found in Dual LLM @camel2025.
 
-== Taxonomies and Analyses
-
-Also important are several papers that create useful taxonomies of prompt injection attacks, which help us develop and analyze detection approaches.
-*Prompt Injection 2.0* proposes a three‑tier taxonomy---multimodal, recursive, hybrid---and shows cross‑site‑script–style chains that bypass current guardrails @mchugh2025pi2.
-In addition to introducing a detector, *Indirect PI* catalogues attacks delivered through third‑party content (HTML, e‑mail) @chen2025indirect.  
-
-== Mechanistic Approaches
-
-To our knowledge, there is little previous mechanistic work focused on detecting prompt injections.
-*Attention Tracker* experimentally identifies attention heads whose last-token attention drops most when subject to a prompt injection attack.
-Averaging attention across these heads to detect prompt injection outperforms Prompt Guard on several common model families and datasets,
-but is vulnerable to adversarial methods @hung2025attention.
-Although this approach is training-free, it still depends heavily on the dataset used to identify important attention heads.
-*Attention Slipping* similarly focuses on the effects of prompt injections on refusal-related attention heads, but proposes a countermeasure
-to prevent attention from dropping rather than a detection mechanism @hu2025attentionslipping.
-
-There is also prior work for using gradients to detect safety policy violations, which is similar to our work though not focused specifically on prompt injections.
-*GradSafe* computes the cosine similarity between the gradient of "safety‑critical" parameters and a reference vector @xie2024gradsafe.
-*Gradient Cuff* considers the gradient of the probability of a refusal response @hu2024gradientcuff-neurips.
-*Token Highlighter* builds on this concept by identifying the tokens with the largest such gradient and "soft removing" other tokens by scaling the embeddings
-down @hu2025tokenhighlighter.
-
 = Detection Approach
 
-Our intuition for detecting prompt injection attacks is to compare how the user prompt is processed when the rule is present versus when it is not,
-in particular analyzing the effect of each token in the user prompt one-by-one.
-We use Integrated Gradients ($op("IG")$) @sundararajan2017 to attribute changes in the probability of a given output to individual tokens.
-
-For benign prompts, we expect no difference in the output or in the $op("IG")$ at any token with or without a rule.
-For malicious prompts without prompt injection, we expect a large difference in the output and consequently a large difference in the $op("IG")$ at some tokens,
-but for our purposes we can ignore this case.
-For malicious prompts with successful prompt injection, we expect no difference in output but for the $op("IG")$ to be much larger on the tokens that
-form the prompt injection attack.
-We offer evidence that this is the case in Appendix 3.
-
-It is worth further considering the case of prompts that are benign, but become malicious when a few tokens are replaced with the baseline used for $op("IG")$.
-These tokens will then have a large $op("IG")$ when the rule is present. However, we assume that the corresponding malicious prompts
-produce significantly different output, and so the $op("IG")$ of these tokens given the actual output will be positive and large even without the rule.
-We examine this case in section 5.2.
-
+Our intuition for detecting successful prompt injections is to compare how the user prompt influences the response when the rule is present versus when it is not.
 In order to minimize changes in the grammatical structure of the prompt and avoid introducing changes due to the positional encoding,
 rather than deleting rules entirely we replace them with specially constructed _null rules_ of the same length#footnote[During the initial analysis
 of our experimental data, we noticed that our construction of most null rules did not count tokens correctly for the Qwen tokenizer.
-This was corrected and the experiment re-run for the Qwen models, resulting in a small but noticeable improvement for Qwen3-8B and
+This was corrected and the experiment re-run for the Qwen models, resulting in a small improvement for Qwen3-8B and
 no noticeable change for Qwen2.5-7B-Instruct.] which we expect not to be relevant to any user prompt.
+
+We hypothesize that the attack portion of the user prompt will have a large causal impact on the output when the rule is present, but not when the
+rule is replaced by the null rule. To detect this, we use Integrated Gradients @sundararajan2017 to attribute changes per-token in the input
+and compare the per-token attributions when using the rule versus the null rule.
+More precisely, we we compute per-token Integrated Gradient attributions for the log-likelihood of the first $j$ output tokens
+under the rule and a null rule; our detector is the attribution distance between these two runs.
+Integrated Gradient attributions are defined relative to a baseline embedding, which we construct by modifying the input
+and then---in order to keep the path from the baseline to the input from straying too far "off manifold"---taking a weighted average with
+the input which favors the input.
+
+We introduce some notation to describe this more formally.
 
 == Notation
 
@@ -206,9 +202,9 @@ Our definition will assume several choices, which will be described in the exper
 - a positive integer $j <= L - ell$ of output tokens to consider
 
 We will work primarily in the embedding space to allow linear combinations.
-We let $e$, $underline(e)$ and $e'$ refer to the images of each of these sequences under the embedding map.
+We let $e$, $underline(e)$ and $e'$ refer to the images of each of these sequences under the embedding map $E$.
 
-== Definitions
+== Formal Definition
 
 We use the log-likelihood of the first $j$ output token embeddings as a score function:
 
@@ -216,9 +212,11 @@ $ F(e) = sum_(t=ell)^(ell+j-1) log p_theta (e_t divides e) $
 
 We define the Integrated Gradient of $F$ with respect to the $i$th token as
 
-$ op("IG")_(i)(x) = (e_i - underline(e)_i) dot.circle integral_0^1(partial F(underline(e) + alpha (e - underline(e)))) / (partial e_i) d alpha $
+$ op("IG")_(i)(x) = (e_i - underline(e)_i) dot.circle integral_0^1(partial F(underline(e) + t (e - underline(e)))) / (partial e_i) d t $
 
 As usual, we approximate the integral with a Riemann sum over $n$ steps, with $n$ chosen experimentally.
+The baseline $underline(e)$ is defined as $underline(e) = (1 - alpha) E(x) + alpha E(underline(x))$ where $underline(x)$
+is the sequence obtained by replacing $(x_u, dots.h, x_U)$ and $(x_ell, dots.h, x_L)$ with `_`, and $alpha$ is chosen experimentally.
 
 This is a vector in the embedding space, so we define the scalar
 $a_i = bold(1)^top op("IG")_(i)(x)$ by summing over the embedding dimensions,
@@ -227,9 +225,6 @@ Similarly, we define $a'$ using the null-ruled $x'$ in place of $x$.
 
 Finally, we define the *attribution distance* with output length $j$ as
 $ op("AD")(x) = norm( a - a')_2 $
-furthermore, we define the *$k$-smoothed attribution distance* as
-$ op("AD")^((k))(x) = norm(macron(a)^((k)) - overline(a')^((k)))_2 $
-where $macron(a)^((k))$ is the rolling average of $a$ with window size $k$.
 
 = Experiment Design
 
@@ -245,9 +240,8 @@ In order to test rule violation detection in the presence of prompt injection at
 Model selection is driven by several criteria:
 - Instruction-following ability
 - System/user prompt distinction
-- Limitations of available hardware
+- Ability to run on RTX 4090 GPUs
 
-In order to run on RTX 4090 GPUs with the maximum available VRAM of 24GB, the practical model size is limited to ~10B parameters in FP16 precision.
 Many small model families such as Gemma, Mistral and Qwen2 were not post-trained with distinct system roles.
 Experimentation with models smaller than 3B parameters found they were unable to enforce most or all of the rules tested.
 We chose to focus on the popular Qwen and Llama families of models, testing:
@@ -256,23 +250,26 @@ We chose to focus on the popular Qwen and Llama families of models, testing:
 - Qwen2.5-7B-Instruct @qwen2024v25
 - Qwen3-8B @qwen2025v3 (in non-thinking mode)
 
-== Prompts
+== System and User Prompts
 
 Since our detection method only looks at the first $j$ tokens for some small $j$, we focus on rules that clearly affect the first few tokens of output.
 A natural class of system prompts to use for this take the form `[general preamble]. If [rule], then reply "[refusal]"`
 or grammatically equivalent. We created a dataset of variations of this prompt format and applicable rules with the help of GPT-4o,
 which can be found in Appendix 1, Table 4.
-We used "Unable" as the refusal string, which is a single token when it appears at the beginning of the assistant response portion
+We used "Unable" as the refusal string, which is a single token when it appears at the beginning of the output portion
 of the chat template for all 4 test models.
 
 Benign prompts were selected from a previously published dataset of benign and malicious prompts @ivry2025sentinel.
 Separately, a hand-crafted list of 60 "barely benign" prompts was prepared to evaluate the method's robustness,
 which differ from malicious prompts by the addition of a few tokens.
+These are similar to prompt injections in that they are a set of additional tokens which cause the rule not to be enforced.
 Malicious prompts needed to be tailored for each rule, so we created a new dataset with suggestions generated by GPT-4o.
 
-For each model and rule, we tested the ability the model to refuse our "malicious" test inputs when given the rule but allow them when given the corresponding null rule.
+For each model and rule, we tested the ability the model to refuse our "malicious" test inputs when given the rule but allow them when given the
+corresponding null rule.
 For each model, we only test rules which refuse with at least 50% probability with the rule, and with at most 10% probability with the null rule.
-For "barely benign" prompts, we only test those which are refused by the model being evaluated with at most 10% probability and which have malicious variants refused with at least 50% probability.
+For "barely benign" prompts, we only test those which are refused by the model being evaluated with at most 10% probability and which have
+malicious variants refused with at least 50% probability.
 
 These new datasets and their refusal probabilities are available in our public repository.
 
@@ -291,14 +288,7 @@ Additionally, we use several automatically generated prompts introduced in _Stru
 An additional novel "Superuser" attack was also included in the test.
 The full text of each attack is included in Appendix 1, and the effectiveness of each attack is examined in Appendix 2.
 
-== Baseline and Null Rules
-
-Integrated gradients are defined relative to a baseline embedding $underline(e)$.
-In principle this can be any length $L$ sequence of vectors in the embedding space, but in practice the behavior of the network far from the images of actual token
-sequences is very noisy, making it extremely difficult and expensive to accurately approximate the integral with a Riemann sum.
-We define $underline(x)$ as the sequence obtained by replacing $(x_u, dots.h, x_U)$ and $(x_ell, dots.h, x_L)$ with `_`.
-Zero and random baselines were tested with Llama-3.2-3B-Instruct but Riemann sum estimates of $op("IG")_(i)(x)$ did not begin to converge even at $n=2048$.
-Other "empty" tokens such as `.`, `<|begin_of_text|>` or whitespace tokens converged more slowly than `_`.
+== Null Rules
 
 Null rules were constructed to avoid refusing any of the malicious or benign prompts.
 To avoid any positional effects, they were chosen to have the same token length as the rules being tested.
@@ -307,7 +297,10 @@ token length matches the original rule (see Appendix 1 for exceptions).
 
 == Responses
 
-Responses were sampled for each unique set of inputs using gradually increasing temperatures and filtered to remove refusals until 3 distinct responses
+Because we are interested in _successful_ prompt injections, we must include the generated responses in our analysis.
+We must use real responses generated by the models being tested for causal attribution to make sense.
+
+Responses were sampled for each unique set of inputs using gradually increasing temperatures and filtered to remove refusals until 3 distinct responses 
 were obtained (5 for the smaller dataset of "Barely Benign" prompts).
 There was a notable tendency for models to refuse with "I won't" or "I can't" rather than "Unable" as directed in the system prompt,
 likely due to other post-training, and these were also filtered out. We also consider "I am not sentient" to be a refusal for the inputs specifically
@@ -317,89 +310,111 @@ likely indicating separate post-training for this class of question.
 This filtering leads us to use $j>=3$ since "I can't" requires 3 tokens to distinguish from "I can".
 After initial investigation of values between $3$ and $10$ with Llama-3.2-3B-Instruct, we restricted our focus to a $j$ value of 3.
 
-== Convergence
+== Baselines and Convergence
 
-The number of steps used to approximate the integral in the Integrated Gradients was validated by comparing the result at $n$ and $2n$ steps
-for each model and each value of $j$, using 1 benign and 1 malicious prompt.
-In every case $n$ was increased by $64$ until the Euclidean distance between the two, normalized by their combined norms, fell under $0.05$.
-This occurred at $n=192$ for Llama models, $n=256$ for Qwen3-8B and $n=512$ for Qwen2.5-7B-Instruct.
+Integrated gradients are defined relative to a baseline embedding $underline(e)$.
+The rate at which the $n$-step Riemann sum $R_n$ used to approximate $op("IG")(x)$ converges depends on our choice of baseline $underline(e)$,
+in particular the length (proportional to $alpha$) of the line between $e$ and $underline(e)$ and how far it strays from the image of token sequences under $E$
+where the models are well-behaved.
+
+We validate convergence by comparing the Riemann sums at $n$ and $2n$ steps, specifically the normalized Euclidean distance
+$ norm( R_n - R_(2n) )_2 / (norm( R_n )_2 + norm( R_(2n) )_2) $
+using a sample of 5 benign and 3 malicious prompts.
+For each model, the value of $n$ was increased starting from 32 to 64 and then by adding 64 repeatedly until this normalized distance fell below .01
+(or .005 for the smallest model Llama-3.2-3B-Instruct).
+
+Initial testing with Llama-3.2-3B-Instruct motivated the choice of `_` in our definition of $underline(x)$, as $op("IG")(x)$ converged more slowly with
+other "empty" tokens such as `.`, `<|begin_of_text|>` or whitespace tokens.
+Experiments with Llama-3.2-3B-Instruct show performance improving slightly as $alpha$ increases but capping out at $alpha=.05$ as shown below.
+
+#let rows   = csv("tables/alpha_comparison.csv").slice(1)
+#let alphas = rows.map(r => fmt(r.at(0)))
+#let ap     = rows.map(r => fmt(r.at(1)))
+
+#figure(
+  caption: [Average Precision of $op("AD")$ at various $alpha$ values for Llama-3.2-3B-Instruct.],
+  block[
+    #table(
+      columns: alphas.len() + 1,
+      align: right,
+      table.header(
+        [*$alpha$*], ..alphas.map(a => [#a])
+      ),
+      [*Average Precision*], ..ap.map(v => [#v])
+    )
+  ]
+)
+
+Conversely, higher values of $alpha$ converge more slowly, with Qwen2.5-7B-Instruct requiring $n=256$ at $alpha=.01$, $n=384$ at $alpha=.05$,
+and triggering numerical stability exceptions at $alpha = .1$.
+
+As a result we selected $alpha=.05$ for all further analysis, with $n=32$ for Llama-3.1-8B-Instruct, $n=128$ for Llama-3.2-3B-Instruct, 
+$n=384$ for Qwen2.5-7B-Instruct and $n=192$ for Qwen3-8B.
+
+== Comparison with Existing Methods
+
+We chose to compare our performance to 2 SoTA detection models, Sentinel and DataSentinel, as well as the unique training-free detection method Attention Tracker.
+Each of these methods produces a numeric score similar to $op("AD")$.
+
+In order to compare Attention Tracker to our results, which use more recent models, we use their public code to select the relevant attention heads.
+Heads selected by their "llm" calibration dataset with $sigma = 3$ or $sigma = 4$ as used in their evaluations performed poorly on our evaluations,
+so we created a new calibration dataset and tested all positive integer $sigma$ values with nonempty heads and selected the best performing set for each model.
+The code for this and the selected heads are available in our fork #link("https://github.com/alexbecker/Attention-Tracker")[github.com/alexbecker/Attention-Tracker].
 
 = Results and Analysis
 
-== Detecting Successful Attacks
-
-To evaluate how well $op("AD")$ discriminates between malicious prompts which successfully bypass the rule and benign prompts,
+To evaluate how well each method discriminates between malicious prompts which successfully bypass the rule and benign prompts,
 we restrict our attention to the "successful" malicious prompts with $p("Unable") < 0.5$ and compute the
-average precision of a binary classifier using $op("AD")$.
+average precision of each method when used as a binary classifier.
 Since system prompts (and hence rules) are generally fixed in deployed systems, we baseline each rule
-against the benign prompts and shift and scale the score distribution so that it is centered at 0 with standard deviation 1.
+against the benign prompts and shift and scale the per-rule score distributions for $op("AD")$ and Attention Tracker#footnote[
+  This was not done for Sentinel because the distribution is tightly clustered at 0 and 1.]
+so that the distribution is centered at 0 with standard deviation 1.
 
 To avoid Simpson's paradox, we weight each sample so that the positive samples
 (i.e. successful malicious prompts) for each rule have the same total weight and do the same for negative samples.
-This results in a chance level slightly below $0.5$ as some rules have no positive samples.
-We evaluate both $op("AD")$ and the smoothed $op("AD")^((2))$, which performs slightly better on 3 out of 4 models.
-Higher degrees of smoothing do not perform better.
+This results in a chance level of $0.5$ for the Llama models, but $0.481$ for Qwen2.5-7B-Instruct and $0.462$ for Qwen3-8B as some rules have no positive samples.
 
-#let rows = csv("tables/attribution_distance_average_precision.csv").slice(1)
+DataSentinel performed poorly on our dataset, with a FPR of 52.6% on our benign prompts and TPR against the most successful attack families ranging from 45% to 61%,
+so was excluded from further analysis. We hypothesize this is due to a lack of non-malicious instruction-following training data.
+
+#let rows = csv("tables/average_precision_comparison.csv").slice(1)
 #let rows = rows.map(r => (
   [#r.at(0)],
-  [#int(float(r.at(1)))],
   [#int(float(r.at(2)))],
-  [#fmt(r.at(3))],
   [#fmt(r.at(4))],
   [#fmt(r.at(5))],
-))
-#figure(
-  caption: [Average Precision per model for $op("AD")$ and $op("AD")^((2))$.],
-  block[
-    #table(
-      columns: (auto, 3em, 3em, 5em, 6em, 7em),
-      align: (left, right, right, right, right, right),
-      table.header[*Model*][*N*][*N Pos*][*Chance Level*][*$"AP"("AD")$*][*$"AP"("AD"^((2)))$*],
-      ..rows.flatten(),
-    )
-  ]
-)
-
-#figure(
-  image("figures/precision_recall.png", width: 120%),
-  caption: [Precision-Recall Curves for $op("AD")$ and $op("AD")^((2))$.]
-)
-
-#let rows = csv("tables/attribution_distance_average_precision.csv").slice(1)
-#let rows = rows.map(r => (
-  [#r.at(0)],
   [#fmt(r.at(6))],
   [#fmt(r.at(7))],
-  [#fmt(r.at(8))],
 ))
 #figure(
-  caption: [Recall using $op("AD")^((2))$ as a classifier at various precision thresholds.],
+  caption: [Average Precision per model for our metric $op("AD")$, Attention Tracker (using both the original and our recalibrated head selection method), and Sentinel.],
   block[
     #table(
-      columns: (auto, 8em, 8em, 8em),
-      align: (left, right, right, right),
-      table.header[*Model*][*Recall \@ 90%*][*Recall \@ 95%*][*Recall \@ 99%*],
+      columns: (auto, 3em, 3.5em, 6em, 6em, 5em),
+      align: (left, right, right, right, right, right),
+      table.header[*Model*][*N Pos*][*AD*][*Attention Tracker (orig)*][*Attention Tracker (recal)*][*Sentinel*],
       ..rows.flatten(),
     )
   ]
 )
 
-These results show that $op("AD")^((2))$ is a moderately effective classifier and can catch a modest fraction of successful attacks with
-a very low false positive rate, although it performs better for the Llama models than the Qwen models.
+Our metric out-performs Attention Tracker for 3 out of 4 models.
+Attention Tracker performs extremely well on Completion and Ignore-Completion attacks---which
+as shown in Appendix 2, Table 6 are the most frequently successful---but poorly on other attacks#footnote[
+  A breakdown by attack type is available in the Jupyter notebook in our GitHub repository.].
+We were unable to determine why Attention Tracker performs so poorly for Qwen2.5-7B-Instruct, where it exhibits a similar but much
+narrow distribution of scores by attack type.
 
-== Robustness
+However, neither method is comparable to the Sentinel fine-tuned detection model. This is not surprising as the attacks tested here
+were mostly well-known when Sentinel's dataset was prepared, and the benign prompts were selected from the same test data used to
+evaluate Sentinel.
 
-Many detection techniques have high false positive rates when faced with benign prompts that are similar to malicious prompts.
-For our method, the most obvious candidate for false positives is prompts which would be malicious without key tokens such as "not",
-which are similar to prompt injections in that they are a set of additional tokens which cause the rule not to be enforced.
-Our hypothesis was that, since these tokens also change the output significantly in the absence of the rule, the Integrated Gradient
-associated with these tokens will be similarly large and positive with or without the rule.
+These results include an ablation study of distance metric for the definition of $op("AD")$ and show that the Euclidean distance
+outperforms cosine distance for 3 out of 4 models.
 
-To confirm this, we use $op("AD")^((2))$ with the same adjustments and thresholds computed in the previous section
-and compute the false positive rate for the "barely benign" prompts at various precision thresholds.
-This was evaluated by computing $op("AD")^((2))$ for the "barely benign" prompts after filtering as described in section 4.2,
-then compute the false positive rate of the classifier in the previous section using the thresholds for 90%, 95% and 99% precision.
+To evaluate whether our metric is misled by the "barely benign" prompts, we selected the thresholds for each model that produced
+the optimal $F_1$ score and computed the FPR on the "barely benign" dataset at this threshold.
 
 #let rows = csv("tables/robustness_check.csv").slice(1)
 #let rows = rows.map(r => (
@@ -408,55 +423,49 @@ then compute the false positive rate of the classifier in the previous section u
   [#fmt(r.at(2))],
   [#fmt(r.at(3))],
   [#fmt(r.at(4))],
+  [#fmt(r.at(5)) -- #fmt(r.at(6))]
 ))
 #figure(
-  caption: [False positive rate on "barely benign" prompts using the thresholds for 90%, 95% and 99% precision on the original dataset.],
+  caption: [Comparison of FPR on the normal dataset vs. on the "barely benign" dataset using a fixed threshold optimized for $F_1$ against the normal dataset.],
   block[
     #table(
-      columns: (auto, 3em, 7em, 7em, 7em),
-      align: (left, left, right, right, right),
-      table.header[*Model*][*N*][*FPR \@ 90%*][*FPR \@ 95%*][*FPR \@ 99%*],
+      columns: (auto, 3em, 3.5em, 5em, 5em, 7em),
+      align: (left, left, right, right, right, right),
+      table.header[*Model*][*N*][*$F_1$*][*Normal Dataset FPR*][*Barely Benign FPR*][*95% CI*],
       ..vmerge(rows),
     )
   ]
 )
 
-Comparing these to the recall values in Table 2, we can see that "barely benign" prompts are less likely to be classified as malicious than
-the successful attacks examined in the previous section, indicating that the classifier remains somewhat effective.
-However, with the exception of Qwen2.5-7B-Instruct, they are higher than we would expect for prompts similar to the original dataset
-(roughly $0.1$, $0.05$ and $0.01$ respectively), indicating some degree of confusion.
+For 3 out of the 4 models, the FPR does not increase significantly, although a small increase cannot be ruled out due to our small sample size.
+The FPR does increase significantly for Qwen3-8B, which is also the worst-performing model.
 
 = Limitations and Future Work
 
-On its own, this method is both more expensive and worse than fine-tuning based methods.
-Furthermore, it has the following limitations:
-- It does not allow for post-processing of LLM output (or at least such post-processing must be differentiable)---e.g. it will not work for an LLM prompted to output a simple pass/fail
-- Rule violations must be apparent in the first few tokens
-
-However, because this method does not rely on any training data, it should be complementary to any fine-tuning method,
-allowing the combined detector to perform better.
-
+Several limitations make this method impractical for use in production systems.
+It is less accurate than fine-tuned detection models.
+It is also very expensive to compute---roughly $n times$ the cost of processing all input tokens.
+While significant speedups could be realized with a small accuracy trade-off by reducing $n$,
+and future work could explore the feasibility of lower-precision quantizations,
+it will still be significantly slower and require more VRAM than other methods.
 Our analysis assumes that classifiers are calibrated for the system prompt, which complicates the process of deploying system prompt updates.
 Selecting a threshold independent of system prompt is possible but will decrease accuracy.
 
-Practical applications may also be limited by compute and VRAM requirements.
-Computing the Riemann sum with $n$ steps costs slightly more than generating $n$ tokens, and this method requires doing so twice per prompt.
-Some speedup could be realized by using a smaller $n$ at a small cost in accuracy.
-More problematically, the additional VRAM required is non-trivial for longer prompts,
-and running in FP16 uses multiple times the VRAM of common 4 and 8-bit quantizations.
-Future work should explore the feasibility of this method with lower-precision quantizations and other optimizations.
+However, this method is still potentially useful in offline or latency-insensitive contexts to screen for novel attacks,
+which fine-tuned models cannot be expected to catch.
 
-The choice of baseline $underline(e)$ is very simplistic and could likely be optimized.
-This appears to have been a particularly poor choice for Qwen2.5-7B-Instruct as it took twice as long as any other model to converge acceptably,
-which may explain why the method performed significantly worse on this model than on any other.
-It also presents a performance penalty, since $norm(e - underline(e))_2$ will grow with the embedding dimension $d$ asymptotic to $sqrt(d)$
-and thus require more steps to approximate with a Riemann sum.
+Several potential avenues of improvement could be explored.
+Many alternative loss functions could be substituted in place of the contrastive entropy of the first $j$ tokens in the definition of $op("AD")$.
+The choice of baseline $underline(e)$ is also simplistic and could likely be optimized.
+This appears to have been a particularly poor choice for the Qwen models, which required more steps to converge,
+and this may explain why the method performed worse on these models.
 
-For the rules analyzed here, $p("Unable")$ would compete with $"AD"$ as a classifier.
-The attacks analyzed here are also relatively simple and not targeted at the specific rules being tested, and could be detected by substituting
-rules which demand returning "Unable" in all cases and checking whether this is followed.
-In principle, $"AD"$ should generalize to more complex classes of rules and attacks for which there is no current alternative,
-but verifying this will require more complicated test data and analysis, and potentially can only be tested with larger models.
+Our analysis is also limited by the datasets we have constructed.
+The attacks analyzed are relatively simple and not targeted at the specific rules being tested.
+Future work could verify that this method works for attacks designed to evade known-answer detection, or for other more complex classes of attacks.
+Since $op("AD")$ is differentiable, standard gradient-based optimization techniques could be used to generate attacks,
+which we expect would evade detection and may offer insights about the behavior of $op("AD")$, although the cost may be prohibitive given the
+expense of computing $op("AD")$ with gradients.
 #pagebreak(weak: true)
 
 #bibliography("paper.bib", style: "ieee")
@@ -579,35 +588,27 @@ Note $N$ varies slightly within the same model because we are not always able to
 The Llama models are vulnerable to a much larger subset of the attacks tested than the Qwen models, which may limit the applicability
 of our analysis to the Qwen models.
 
-= Mechanistic Validation
+= Distance Ablation
 
-To confirm the intuition behind our definition of $op("AD")$, specifically that the Integrated Gradients will be higher over the tokens in the attack
-in $a$ than in $a'$, we define the *attack attribution delta* $op("AAD")(x)$ as the sum of $a - a'$ over these tokens.
+In addition to the Euclidean distance, we tested defining $op("AD")$ using Manhattan and cosine distance.
+We found Euclidean distance outperforms Manhattan for all models and cosine for 3 out of 4 models.
+Cosine distance makes less theoretical sense because the magnitude of the attributions matters.
 
-In order to study only the successful prompt injection attacks, we limit our attention to the types of attack that significantly outperformed
-naive malicious prompting (i.e. those in Table 7), and further to rows where the attack decreased $p("Unable")$.
-We compute the frequency with which $op("AAD") > 0$ per (rule, attack) pair and report the macro-average in Table 8.
-Confidence intervals are again computed using BCa, this time clustering by (rule, attack) pair.
-
-#let rows = csv("tables/attack_attribution_delta.csv").slice(1)
+#let rows = csv("tables/attribution_distance_average_precision.csv").slice(1)
 #let rows = rows.map(r => (
   [#r.at(0)],
-  [#int(float(r.at(1)))],
-  [#fmt(r.at(2))],
-  [#fmt(r.at(3)) -- #fmt(r.at(4))]
+  [#fmt(r.at(4))],
+  [#fmt(r.at(5))],
+  [#fmt(r.at(6))],
 ))
 #figure(
-  caption: [Frequency with which $"AAD" > 0$ for effective attacks, per model.],
+  caption: [Average Precision per model for our metric $op("AD")$ using various distance functions.],
   block[
     #table(
-      columns: (auto, 3em, 8em, 7em),
-      align: (left, left, right, right),
-      table.header[*Model*][*N*][*$p("AAD" > 0)$*][*95% CI*],
-      ..vmerge(rows),
+      columns: (auto, 4.5em, 6.5em, 6em),
+      align: (left, right, right, right),
+      table.header[*Model*][*Cosine*][*Manhattan*][*Euclidean*],
+      ..rows.flatten(),
     )
   ]
 )
-
-This provides weak confirmation of our intuition---we can be confident that $op("AAD") > 0$ in the majority of cases for all models.
-However, it also suggests an upper limit on how effective our technique may be, which may explain the poor performance of the classifier
-in the high recall region which can be observed in Figure 1.
