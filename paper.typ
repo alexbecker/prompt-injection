@@ -198,11 +198,11 @@ where $(x_r, dots.h, x_R)$ is the rule being enforced, $(x_u, dots.h, x_U)$ is t
 
 Our definition will assume several choices, which will be described in the experiment setup:
 - a *baseline* $underline(x)$ used to compute integrated gradients
-- a *null rule* sequence $(x'_r, dots.h, x'_R)$, and the corresponding $x'$ defined by substituting this sequence for $(x_r, dots.h, x_R)$ in $x$
+- a *null rule* sequence $(x^("null")_r, dots.h, x^("null")_R)$, and the corresponding $x^("null")$ defined by substituting this sequence for $(x_r, dots.h, x_R)$ in $x$
 - a positive integer $j <= L - ell$ of output tokens to consider
 
 We will work primarily in the embedding space to allow linear combinations.
-We let $e$, $underline(e)$ and $e'$ refer to the images of each of these sequences under the embedding map $E$.
+We let $e$, $underline(e)$, $e^("null")$ and $underline(e)^("null")$ refer to the images of each of these sequences under the embedding map $E$.
 
 == Formal Definition
 
@@ -221,10 +221,10 @@ is the sequence obtained by replacing $(x_u, dots.h, x_U)$ and $(x_ell, dots.h, 
 This is a vector in the embedding space, so we aggregate per-token attributions
 $a_i = bold(1)^top op("IG")_(i)(x)$ by summing over the embedding dimensions,
 which gives the sequence $a = (a_(u), dots.h, a_U)$ of gradient attributions on each token in the user prompt.
-Similarly, we define $a'$ using the null-ruled $x'$ in place of $x$.
+Similarly, we define $a^("null")$ using the null-ruled $x^("null")$ in place of $x$.
 
 Finally, we define the *attribution distance* with output length $j$ as
-$ op("AD")(x) = norm( a - a')_2 $
+$ op("AD")(x) = norm( a - a^("null"))_2 $
 
 = Experiment Design
 
