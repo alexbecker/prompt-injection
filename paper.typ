@@ -125,9 +125,9 @@ Detection methods tend to work for both direct and indirect prompt injections, a
 because the attack methods and objectives typically tested in both settings have high overlap.
 However, we will see in our analysis that this does not necessarily transfer when attack objectives are changed to fit the direct prompt injection scenario.
 
-Most defenses leverage off‑the‑shelf text‑classification models.  
-An early example is *LLM Guard‑v2*, which fine‑tunes DeBERTa‑v3 on a composite dataset of known attacks and benign prompts
-and reports $F_1 approx 0.95$ on its held‑out split @llmguardv2.
+Most defenses leverage off-the-shelf text-classification models.  
+An early example is *LLM Guard-v2*, which fine-tunes DeBERTa-v3 on a composite dataset of known attacks and benign prompts
+and reports $F_1 approx 0.95$ on its held-out split @llmguardv2.
 *Sentinel* fine-tunes a ModernBERT-large classifier on a more diverse corpus, reporting achieving nearly 100% accuracy on older benchmarks
 and $F_1 approx 0.98$ on its unseen test set @ivry2025sentinel.
 *DataSentinel* achieves similar benchmark results but better robustness against adaptive attacks by formulating detection as a minimax game
@@ -140,7 +140,7 @@ but is vulnerable to adversarial methods @hung2025attention.
 Although this approach is training-free, it still requires calibration using a small set of known attacks to identify important attention heads.
 
 There is also prior work for using gradients to detect safety policy violations, which is similar to our work though not focused specifically on prompt injections.
-*GradSafe* computes the cosine similarity between the gradient of "safety‑critical" parameters and a reference vector @xie2024gradsafe.
+*GradSafe* computes the cosine similarity between the gradient of "safety-critical" parameters and a reference vector @xie2024gradsafe.
 *Gradient Cuff* considers the gradient of the probability of a refusal response @hu2024gradientcuff-neurips.
 *Token Highlighter* builds on this concept by identifying the tokens with the largest such gradient and "soft removing" other tokens by scaling the embeddings
 down @hu2025tokenhighlighter.
@@ -148,26 +148,26 @@ down @hu2025tokenhighlighter.
 == Model Hardening
 
 More recent approaches introduce logical separation between the trusted and untrusted inputs in the network and fine-tuning the LLM to treat them differently.
-*Structured Queries (StruQ)* adds a dedicated delimiter token that splits a query into `⟨prompt⟩` and `⟨data⟩` channels; fine‑tuning with contrastive pairs cuts manual jailbreak success on Llama-7B and Mistral-7B to $<2%$ and significantly reduces the effectiveness of several adversarial methods @Chen2025StruQ.
-*SecAlign* builds on this work using a preference‑optimization dataset where "secure" completions obey the system prompt and "insecure" ones follow the injected instruction; RLHF on this dataset drives the success rate of six canonical attacks to $<10%$ on Llama-3-8B-Instruct without harming AlpacaEval scores @secalign2025.
+*Structured Queries (StruQ)* adds a dedicated delimiter token that splits a query into `⟨prompt⟩` and `⟨data⟩` channels; fine-tuning with contrastive pairs cuts manual jailbreak success on Llama-7B and Mistral-7B to $<2%$ and significantly reduces the effectiveness of several adversarial methods @Chen2025StruQ.
+*SecAlign* builds on this work using a preference-optimization dataset where "secure" completions obey the system prompt and "insecure" ones follow the injected instruction; RLHF on this dataset drives the success rate of six canonical attacks to $<10%$ on Llama-3-8B-Instruct without harming AlpacaEval scores @secalign2025.
 
 Both StruQ and SecAlign focus on indirect prompt injection.
 Direct prompt injection hardening was first attempted by OpenAI, which introduced the *Instruction Hierarchy* dataset containing conflicting system,
 user and tool content, and fine-tuned GPT-3.5 on it to respect their precedence rules @wallace2024instructionhierarchy.
-*Instructional Segment Embedding (ISE)* introduces a four‑way segment embedding (`system`, `user`, `data`, `response`)
+*Instructional Segment Embedding (ISE)* introduces a four-way segment embedding (`system`, `user`, `data`, `response`)
 which handles both direct and indirect prompt injection attacks.
-Fine-tuning Llama‑2‑7B with ISE improves its performance on both the Instruction Hierarchy dataset and StruQ's indirect prompt injection benchmark @ise2025,
+Fine-tuning Llama-2-7B with ISE improves its performance on both the Instruction Hierarchy dataset and StruQ's indirect prompt injection benchmark @ise2025,
 but does not achieve parity with SecAlign on indirect prompt injection.
 
 To our knowledge, the only training-free hardening method is *Attention Sharpening*, which builds on the insights of the Attention Tracker detection method
 by adjusting attention normalization to prevent what it calls "Attention Slipping" in the critical attention heads @hu2025attentionslipping.
 
-== Capability‑based Isolation
+== Capability-based Isolation
 
 Other work has focused on minimizing the harm a successful prompt injection can cause by requiring user approval for any dangerous action.
-The *Dual LLM* pattern proposed by Willison in 2023 pipes the output of an "untrusted" assistant model into a second, policy‑enforcing model that rewrites or refuses unsafe text @willison2023dualllm. While effective against direct prompt injections, it remains vulnerable if the second model blindly trusts the first model’s output and so can still relay hidden adversarial payloads @camel2025 @willison2025camel.
+The *Dual LLM* pattern proposed by Willison in 2023 pipes the output of an "untrusted" assistant model into a second, policy-enforcing model that rewrites or refuses unsafe text @willison2023dualllm. While effective against direct prompt injections, it remains vulnerable if the second model blindly trusts the first model’s output and so can still relay hidden adversarial payloads @camel2025 @willison2025camel.
 
-Google DeepMind’s *CaMeL* (Capabilities for Machine Learning) hardens this idea by isolating untrusted input inside a "Quarantined LLM" that has no tool‑calling rights, then passing only a verified, least‑privilege representation to a "Privileged LLM". CaMeL solves 67% of tasks on the AgentDojo benchmark with formal security guarantees and addresses the vulnerability found in Dual LLM @camel2025.
+Google DeepMind’s *CaMeL* (Capabilities for Machine Learning) hardens this idea by isolating untrusted input inside a "Quarantined LLM" that has no tool-calling rights, then passing only a verified, least-privilege representation to a "Privileged LLM". CaMeL solves 67% of tasks on the AgentDojo benchmark with formal security guarantees and addresses the vulnerability found in Dual LLM @camel2025.
 
 = Detection Approach
 
@@ -181,7 +181,7 @@ no noticeable change for Qwen2.5-7B-Instruct.] which we expect not to be relevan
 We hypothesize that the attack portion of the user prompt will have a large causal impact on the output when the rule is present, but not when the
 rule is replaced by the null rule. To detect this, we use Integrated Gradients @sundararajan2017 to attribute changes per-token in the input
 and compare the per-token attributions when using the rule versus the null rule.
-More precisely, we we compute per-token Integrated Gradient attributions for the log-likelihood of the first $j$ output tokens
+More precisely, we compute per-token Integrated Gradient attributions for the log-likelihood of the first $j$ output tokens
 under the rule and a null rule; our detector is the attribution distance between these two runs.
 Integrated Gradient attributions are defined relative to a baseline embedding, which we construct by modifying the input
 and then---in order to keep the path from the baseline to the input from straying too far "off manifold"---taking a weighted average with
@@ -218,7 +218,7 @@ As usual, we approximate the integral with a Riemann sum over $n$ steps, with $n
 The baseline $underline(e)$ is defined as $underline(e) = (1 - alpha) E(x) + alpha E(underline(x))$ where $underline(x)$
 is the sequence obtained by replacing $(x_u, dots.h, x_U)$ and $(x_ell, dots.h, x_L)$ with `_`, and $alpha$ is chosen experimentally.
 
-This is a vector in the embedding space, so we define the scalar
+This is a vector in the embedding space, so we aggregate per-token attributions
 $a_i = bold(1)^top op("IG")_(i)(x)$ by summing over the embedding dimensions,
 which gives the sequence $a = (a_(u), dots.h, a_U)$ of gradient attributions on each token in the user prompt.
 Similarly, we define $a'$ using the null-ruled $x'$ in place of $x$.
@@ -257,7 +257,7 @@ A natural class of system prompts to use for this take the form `[general preamb
 or grammatically equivalent. We created a dataset of variations of this prompt format and applicable rules with the help of GPT-4o,
 which can be found in Appendix 1, Table 4.
 We used "Unable" as the refusal string, which is a single token when it appears at the beginning of the output portion
-of the chat template for all 4 test models.
+of the chat template for all 4 test models#footnote[`Unable` has token ID 17512 for the Llama models and 17075 for the Qwen models.].
 
 Benign prompts were selected from a previously published dataset of benign and malicious prompts @ivry2025sentinel.
 Separately, a hand-crafted list of 60 "barely benign" prompts was prepared to evaluate the method's robustness,
@@ -590,8 +590,8 @@ of our analysis to the Qwen models.
 
 = Distance Ablation
 
-In addition to the Euclidean distance, we tested defining $op("AD")$ using Manhattan and cosine distance.
-We found Euclidean distance outperforms Manhattan for all models and cosine for 3 out of 4 models.
+In addition to the $ell_2$ (Euclidean) distance, we tested defining $op("AD")$ using $ell_1$, $ell_infinity$ and cosine distance.
+We found Euclidean distance outperforms other $ell_p$ distances for all models and cosine for 3 out of 4 models.
 Cosine distance makes less theoretical sense because the magnitude of the attributions matters.
 
 #let rows = csv("tables/attribution_distance_average_precision.csv").slice(1)
@@ -600,14 +600,15 @@ Cosine distance makes less theoretical sense because the magnitude of the attrib
   [#fmt(r.at(4))],
   [#fmt(r.at(5))],
   [#fmt(r.at(6))],
+  [#fmt(r.at(7))],
 ))
 #figure(
-  caption: [Average Precision per model for our metric $op("AD")$ using various distance functions.],
+  caption: [Average Precision of $op("AD")$ per model using various distance functions.],
   block[
     #table(
-      columns: (auto, 4.5em, 6.5em, 6em),
-      align: (left, right, right, right),
-      table.header[*Model*][*Cosine*][*Manhattan*][*Euclidean*],
+      columns: (auto, 4em, 4em, 4em, 4em),
+      align: (left, right, right, right, right),
+      table.header[*Model*][*$op("cos")$*][*$ell_1$*][*$ell_infinity$*][*$ell_2$*],
       ..rows.flatten(),
     )
   ]
