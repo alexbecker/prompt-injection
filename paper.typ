@@ -223,8 +223,19 @@ $a_i = bold(1)^top op("IG")_(i)(x)$ by summing over the embedding dimensions,
 which gives the sequence $a = (a_(u), dots.h, a_U)$ of gradient attributions on each token in the user prompt.
 Similarly, we define $a^("null")$ using the null-ruled $x^("null")$ in place of $x$.
 
-Finally, we define the *attribution distance* with output length $j$ as
-$ op("AD")(x) = norm( a - a^("null"))_2 $
+We are interested in the difference $a - a^("null")$ between the rule and null-rule cases, which is illustrated in Figure 1.
+We define the *attribution distance* with output length $j$ as $op("AD")(x) = norm( a - a^("null"))_2$.
+
+#figure(
+  image("figures/per_token_illustration.png", width: 120%),
+  caption: [The vectors $a - a^("null")$ for representative attack and benign prompts. Note that the difference between $a$ and $a^("null")$ is largest in the attack itself, but is still larger in the rest of the malicious prompt, suggesting the rule is still having some effect.]
+)
+
+Note that we do not normalize $op("AD")(x)$ by length, as the completeness property of integrated gradients implies we should expect the sum of $op("IG")_(i)(x)$
+over all tokens to equal $F(e) - F(underline(e))$ and therefore be independent of length#footnote[
+  We confirm experimentally that $op("AD")(x)$ is not correlated with length in the Jupyter notebook in our GitHub repository.
+].
+
 
 = Experiment Design
 
