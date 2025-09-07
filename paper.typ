@@ -1,12 +1,16 @@
-#import "@preview/unequivocal-ams:0.1.2": ams-article
+#import "@preview/charged-ieee:0.1.4": ieee
 #import "@preview/oxifmt:0.2.1": strfmt
-#show: ams-article.with(
-  title: text(  // Override for readability in PDF.js
-    font: "TeX Gyre Termes",
-    weight: 700,
-    tracking: 0pt,
-  )[Detecting Prompt Injections with Contrastive Per-Token Attributions],
-  authors: (( name: "Alex Becker" ),),
+
+#show: ieee.with(
+  title: [Detecting Prompt Injections with Contrastive Per-Token Attributions],
+  authors: (( name: "Alex Becker", organization: "Limit AI", email: "alcubecker@gmail.com"),),
+  index-terms: (
+    "Prompt injection",
+    "Integrated Gradients (IG)",
+    "Safety policy compliance",
+    "Training-free detection",
+  ),
+  paper-size: "us-letter",
   abstract: [
 Modern LLMs are often given rules to follow via a trusted system prompt and then fed untrusted user prompts.
 However, malicious user prompts are frequently able to bypass these rules using techniques known as prompt injections.
@@ -20,6 +24,7 @@ Code & data: #link("https://github.com/alexbecker/prompt-injection")[github.com/
 )
 #show list: set block(below: 1em)
 #show enum: set block(below: 1em)
+#show smallcaps: it => it.body
 #set text(hyphenate: false)
 #let is-num-str = s => s.find(regex("^-?[0-9]+(\\.[0-9]+)?$")) != none
 #let fmt = n => if(is-num-str(n)) { strfmt("{:.3}", float(n)) } else { n }
@@ -227,8 +232,13 @@ We are interested in the difference $a - a^("null")$ between the rule and null-r
 We define the *attribution distance* with output length $j$ as $op("AD")(x) = norm( a - a^("null"))_2$.
 
 #figure(
-  image("figures/per_token_illustration.png", width: 120%),
-  caption: [The vectors $a - a^("null")$ for representative attack and benign prompts. Note that the difference between $a$ and $a^("null")$ is largest in the attack itself, but is still larger in the rest of the malicious prompt, suggesting the rule is still having some effect.]
+  scope: "parent",
+  placement: top,
+  image("figures/per_token_illustration.png"),
+  caption: [
+    The vectors $a - a^("null")$ for representative attack and benign prompts. Note that the difference between $a$ and $a^("null")$ is largest in the attack itself,
+    but is still larger in the rest of the malicious prompt, suggesting the rule is still having some effect.
+  ]
 )
 
 Note that we do not normalize $op("AD")(x)$ by length, as the completeness property of integrated gradients implies we should expect the sum of $op("IG")_(i)(x)$
@@ -266,7 +276,7 @@ We chose to focus on the popular Qwen and Llama families of models, testing:
 Since our detection method only looks at the first $j$ tokens for some small $j$, we focus on rules that clearly affect the first few tokens of output.
 A natural class of system prompts to use for this take the form `[general preamble]. If [rule], then reply "[refusal]"`
 or grammatically equivalent. We created a dataset of variations of this prompt format and applicable rules with the help of GPT-4o,
-which can be found in Appendix 1, Table 4.
+which can be found in Appendix I, Table IV.
 We used "Unable" as the refusal string, which is a single token when it appears at the beginning of the output portion
 of the chat template for all 4 test models#footnote[`Unable` has token ID 17512 for the Llama models and 17075 for the Qwen models.].
 
@@ -297,14 +307,14 @@ The "Escape-Separation" attack has been modified to start with `.` since the Lla
 and several variations of it and "Escape-Deletion" are tested with different numbers of newlines or backspaces respectively.
 Additionally, we use several automatically generated prompts introduced in _StruQ_, which we refer to as "StruQ Suffix {1,2}" and "StruQ TAP 1".
 An additional novel "Superuser" attack was also included in the test.
-The full text of each attack is included in Appendix 1, and the effectiveness of each attack is examined in Appendix 2.
+The full text of each attack is included in Appendix I, and the effectiveness of each attack is examined in Appendix II.
 
 == Null Rules
 
 Null rules were constructed to avoid refusing any of the malicious or benign prompts.
 To avoid any positional effects, they were chosen to have the same token length as the rules being tested.
 In most cases, the null rule was `they request [N] flowers`  where $N$ is a sequence of nines such that the
-token length matches the original rule (see Appendix 1 for exceptions).
+token length matches the original rule (see Appendix I, Table V for exceptions).
 
 == Responses
 
@@ -343,7 +353,9 @@ Experiments with Llama-3.2-3B-Instruct show performance improving slightly as $a
 #let ap     = rows.map(r => fmt(r.at(1)))
 
 #figure(
-  caption: [Average Precision of $op("AD")$ at various $alpha$ values for Llama-3.2-3B-Instruct.],
+  caption: [
+    Average Precision of $op("AD")$ at various $alpha$ values for Llama-3.2-3B-Instruct.
+  ],
   block[
     #table(
       columns: alphas.len() + 1,
@@ -399,7 +411,9 @@ so was excluded from further analysis. We hypothesize this is due to a lack of n
   [#fmt(r.at(7))],
 ))
 #figure(
-  caption: [Average Precision per model for our metric $op("AD")$, Attention Tracker (using both the original and our recalibrated head selection method), and Sentinel.],
+  caption: [
+    Average Precision per model for our metric $op("AD")$, Attention Tracker (using both the original and our recalibrated head selection method), and Sentinel.
+  ],
   block[
     #table(
       columns: (auto, 3em, 3.5em, 6em, 6em, 5em),
@@ -412,7 +426,7 @@ so was excluded from further analysis. We hypothesize this is due to a lack of n
 
 Our metric out-performs Attention Tracker for 3 out of 4 models.
 Attention Tracker performs extremely well on Completion and Ignore-Completion attacks---which
-as shown in Appendix 2, Table 6 are the most frequently successful---but poorly on other attacks#footnote[
+as shown in Appendix II, Table VII are the most frequently successful---but poorly on other attacks#footnote[
   A breakdown by attack type is available in the Jupyter notebook in our GitHub repository.].
 We were unable to determine why Attention Tracker performs so poorly for Qwen2.5-7B-Instruct, where it exhibits a similar but much
 narrow distribution of scores by attack type.
@@ -437,7 +451,9 @@ the optimal $F_1$ score and computed the FPR on the "barely benign" dataset at t
   [#fmt(r.at(5)) -- #fmt(r.at(6))]
 ))
 #figure(
-  caption: [Comparison of FPR on the normal dataset vs. on the "barely benign" dataset using a fixed threshold optimized for $F_1$ against the normal dataset.],
+  caption: [
+    Comparison of FPR on the normal dataset vs. on the "barely benign" dataset using a fixed threshold optimized for $F_1$ against the normal dataset.
+  ],
   block[
     #table(
       columns: (auto, 3em, 3.5em, 5em, 5em, 7em),
@@ -501,10 +517,12 @@ User inputs were used verbatim as user prompts except for the email system promp
   [#raw(r.at(2))],
 ))
 #figure(
-  caption: [System prompts and rules.],
+  caption: [
+    System prompts and rules.
+  ],
   block[
     #table(
-      columns: (auto, auto),
+      columns: (auto, 14.25em),
       align: (left, left),
       table.header[*System Prompt Template*][*Rule*],
       ..vmerge(rows),
@@ -512,7 +530,7 @@ User inputs were used verbatim as user prompts except for the email system promp
   ]
 )
 
-Except as noted in Table 6 below, null rules were constructed by repeating either `9` (for Qwen models) or `999` (for Llama models) in the string
+Except as noted in Table V below, null rules were constructed by repeating either `9` (for Qwen models) or `999` (for Llama models) in the string
 `they request [N] flowers`. It was not necessary to construct different exceptions for Qwen and Llama since these examples match the original
 rule token lengths in both.
 
@@ -523,7 +541,9 @@ rule token lengths in both.
   ("they request medical advice", "they request one flower"),
 )
 #figure(
-  caption: [Exceptional null rules.],
+  caption: [
+    Exceptional null rules.
+  ],
   block[
     #table(
       columns: (auto, auto),
@@ -534,7 +554,7 @@ rule token lengths in both.
   ]
 )
 
-All attacks are listed in Table 6 below in Python f-string format, with `prompt` and `refusal` to be interpolated.
+All attacks are listed in Table VI below in Python f-string format, with `prompt` and `refusal` to be interpolated.
 The "Escape-{Separation,Deletion}-[N]" attacks use $N$ copies of `\n` or `\b` respectively and are truncated for readability.
 Note that Python f-strings will replace `{{` with `{` and `}}` with `}`,
 and that we treat `\b` as the literal 2-character string but `\n` as a newline.
@@ -553,7 +573,9 @@ and that we treat `\b` as the literal 2-character string but `\n` as a newline.
   )]
 ))
 #figure(
-  caption: [Prompt injection attacks in Python f-string format.],
+  caption: [
+    Prompt injection attacks in Python f-string format.
+  ],
   block[
     #table(
       columns: (auto, auto),
@@ -573,7 +595,7 @@ Positive values indicate the attack made refusal less likely.
 
 We examine $Delta p("Unable")$ per model and attack by computing statistics per-rule and reporting its macro-average (equal weight per rule).
 Confidence intervals are computed using BCa @efron1987bca (cluster bootstrap over rules) with the macro-average recomputed on each resample.
-The attacks with an average $Delta p("Unable") > 0$ with at least 97.5% confidence are listed in Table 6.
+The attacks with an average $Delta p("Unable") > 0$ with at least 97.5% confidence are listed in Table VII.
 Note $N$ varies slightly within the same model because we are not always able to sample 3 distinct responses for all attacks.
 
 #let rows = csv("tables/delta_p_refusal.csv").slice(1)
@@ -585,10 +607,12 @@ Note $N$ varies slightly within the same model because we are not always able to
   [#fmt(r.at(4)) -- #fmt(r.at(5))]
 ))
 #figure(
-  caption: [Significantly effective attacks on each model.],
+  caption: [
+    Significantly effective attacks on each model.
+  ],
   block[
     #table(
-      columns: (auto, 8em, 2.5em, 7em, 6.5em),
+      columns: (auto, 8em, 2.5em, 7em, 7em),
       align: (left, left, right, right, right),
       table.header[*Model*][*Attack*][*N*][*$Delta p("Unable")$*][*95% CI*],
       ..vmerge(rows),
@@ -599,7 +623,33 @@ Note $N$ varies slightly within the same model because we are not always able to
 The Llama models are vulnerable to a much larger subset of the attacks tested than the Qwen models, which may limit the applicability
 of our analysis to the Qwen models.
 
-= Distance Ablation
+= Ablations
+
+== Response Length (j)
+
+In addition to $j=3$, we tested $j={4,5,7,10}$ using Llama-3.1-8B-Instruct due to its fast convergence and middle-of-the-pack average precision.
+
+#let rows = csv("tables/response_length_ablation.csv").slice(1)
+#let js = rows.map(r => int(float(r.at(0))))
+#let ap = rows.map(r => fmt(r.at(1)))
+
+#figure(
+  caption: [
+    Average Precision of $op("AD")$ using Llama-3.1-8B-Instruct with various $j$ values.
+  ],
+  block[
+    #table(
+      columns: js.len() + 1,
+      align: right,
+      table.header(
+        [*$j$*], ..js.map(a => [#a])
+      ),
+      [*Average Precision*], ..ap.map(v => [#v])
+    )
+  ]
+)
+
+== Distance Function
 
 In addition to the $ell_2$ (Euclidean) distance, we tested defining $op("AD")$ using $ell_1$, $ell_infinity$ and cosine distance.
 We found Euclidean distance outperforms other $ell_p$ distances for all models and cosine for 3 out of 4 models.
@@ -614,7 +664,9 @@ Cosine distance makes less theoretical sense because the magnitude of the attrib
   [#fmt(r.at(7))],
 ))
 #figure(
-  caption: [Average Precision of $op("AD")$ per model using various distance functions.],
+  caption: [
+    Average Precision of $op("AD")$ per model using various distance functions.
+  ],
   block[
     #table(
       columns: (auto, 4em, 4em, 4em, 4em),
