@@ -12,12 +12,13 @@
   ),
   paper-size: "us-letter",
   abstract: [
-Modern LLMs are often given rules to follow via a trusted system prompt and then fed untrusted user prompts.
+LLMs are often given rules to follow via a trusted system prompt and then fed untrusted user prompts.
 However, malicious user prompts are frequently able to bypass these rules using techniques known as prompt injections.
 Existing defenses against prompt injection generally depend on fine-tuning models using datasets of known attacks,
 making them vulnerable to unknown attacks.
-We propose a novel metric for detecting direct prompt injection attacks using per-token attributions rather than fine-tuning.
-This metric outperforms existing training-free methods on a majority of models tested and is the first to
+We propose a novel metric for detecting successful direct prompt injections given fixed system prompts
+using per-token attributions rather than fine-tuning.
+This metric outperforms existing training-free methods on a majority of models tested and is, to our knowledge, the first to
 require no example attacks to calibrate.
 Code & data: #link("https://github.com/alexbecker/prompt-injection")[github.com/alexbecker/prompt-injection]
   ]
@@ -99,11 +100,11 @@ However, the system prompt/user prompt separation does not offer the same guaran
 Prompt injection defenses have been developed which have reasonable success in the _indirect prompt injection_ setting,
 which assumes inputs are partitioned into trusted instructions and untrusted data.
 However, this assumption cannot hold in any situation where prior model outputs (which are tainted by untrusted input)
-are expected to provide instructions---which includes reasoning models, multi-turn conversations and agents.
+are expected to provide instructions---which includes reasoning models, multi-turn conversations, and agents.
 These use cases require us to handle the more general problem of _direct prompt injection_,
 creating separate user and system roles and assuming that instructions from the user or from previous LLM output should be
 followed unless they conflict with instructions from the system role.
-Furthermore, many prompt injection defenses have historically assumed that prompt injection attacks obfuscate instructions that are
+Furthermore, many prompt injection defenses have historically assumed that prompt injections obfuscate instructions that are
 objectively malicious, while agent authors expect to be able to enforce system policies (e.g. restrictions on spending money)
 which preclude actions that in other contexts may be desirable.
 
@@ -111,13 +112,10 @@ While some work has been done to make models handle conflicts between instructio
 evaluating the success of this work requires making very subjective judgments.
 We instead focus on detecting clear-cut violations of rules agent authors wish an LLM to enforce, leaving
 the responsibility on the harness to determine how to handle these rejections (e.g. by automatically rewriting and retrying a query).
-This eliminates any ambiguity about what it means for a rule to be enforced, allowing us to ignore malicious prompts which are handled correctly
+This reduces ambiguity about what it means for a rule to be enforced, allowing us to ignore malicious prompts which are handled correctly
 and focus on distinguishing between benign prompts and successful prompt injections.
 While this may appear to be a major restriction, many practical requirements can be realized in this format---for example, the requirement that
 a list of transactions balance debits and credits can be converted into the rule "reject attempts to generate a list of transactions that is not balanced".
-
-Since we are interested in causal analysis of prompt injections, we restrict our attention to _successful_ prompt injections.
-This means we consider not only the user input but the generated response, since the generated response defines whether the prompt injection is successful.
 
 = Related Work
 
@@ -160,7 +158,7 @@ Both StruQ and SecAlign focus on indirect prompt injection.
 Direct prompt injection hardening was first attempted by OpenAI, which introduced the *Instruction Hierarchy* dataset containing conflicting system,
 user and tool content, and fine-tuned GPT-3.5 on it to respect their precedence rules @wallace2024instructionhierarchy.
 *Instructional Segment Embedding (ISE)* introduces a four-way segment embedding (`system`, `user`, `data`, `response`)
-which handles both direct and indirect prompt injection attacks.
+which handles both direct and indirect prompt injections.
 Fine-tuning Llama-2-7B with ISE improves its performance on both the Instruction Hierarchy dataset and StruQ's indirect prompt injection benchmark @ise2025,
 but does not achieve parity with SecAlign on indirect prompt injection.
 
@@ -176,6 +174,8 @@ Google DeepMind’s *CaMeL* (Capabilities for Machine Learning) hardens 
 
 = Detection Approach
 
+Because we are interested in _successful_ prompt injections, we consider not only the user input but the generated response (which determines whether the
+injection is successful).
 Our intuition for detecting successful prompt injections is to compare how the user prompt influences the response when the rule is present versus when it is not.
 In order to minimize changes in the grammatical structure of the prompt and avoid introducing changes due to the positional encoding,
 rather than deleting rules entirely we replace them with specially constructed _null rules_ of the same length#footnote[During the initial analysis
@@ -184,8 +184,11 @@ This was corrected and the experiment re-run for the Qwen models, resulting in a
 no noticeable change for Qwen2.5-7B-Instruct.] which we expect not to be relevant to any user prompt.
 
 We hypothesize that the attack portion of the user prompt will have a large causal impact on the output when the rule is present, but not when the
-rule is replaced by the null rule. To detect this, we use Integrated Gradients @sundararajan2017 to attribute changes per-token in the input
+rule is replaced by the null rule. We expect this to be especially true in the first few output tokens, which will include the refusal token in the event of
+a refusal, and so we restrict our attention to these tokens.
+We use Integrated Gradients @sundararajan2017 to attribute changes per-token in the input
 and compare the per-token attributions when using the rule versus the null rule.
+
 More precisely, we compute per-token Integrated Gradient attributions for the log-likelihood of the first $j$ output tokens
 under the rule and a null rule; our detector is the attribution distance between these two runs.
 Integrated Gradient attributions are defined relative to a baseline embedding, which we construct by modifying the input
@@ -211,7 +214,7 @@ We let $e$, $underline(e)$, $e^("null")$ and $underline(e)^("null")$ refer to th
 
 == Formal Definition
 
-We use the log-likelihood of the first $j$ output token embeddings as a score function:
+We use the log-likelihood of the first $j$ output token embeddings as a score function, computed using teacher-forcing:
 
 $ F(e) = sum_(t=ell)^(ell+j-1) log p_theta (e_t divides e) $
 
@@ -226,7 +229,7 @@ is the sequence obtained by replacing $(x_u, dots.h, x_U)$ and $(x_ell, dots.h, 
 This is a vector in the embedding space, so we aggregate per-token attributions
 $a_i = bold(1)^top op("IG")_(i)(x)$ by summing over the embedding dimensions,
 which gives the sequence $a = (a_(u), dots.h, a_U)$ of gradient attributions on each token in the user prompt.
-Similarly, we define $a^("null")$ using the null-ruled $x^("null")$ in place of $x$.
+Similarly, we define $a^("null")$ using $x^("null")$ in place of $x$.
 
 We are interested in the difference $a - a^("null")$ between the rule and null-rule cases, which is illustrated in Figure 1.
 We define the *attribution distance* with output length $j$ as $op("AD")(x) = norm( a - a^("null"))_2$.
@@ -236,24 +239,27 @@ We define the *attribution distance* with output length $j$ as $op("AD")(x) = no
   placement: top,
   image("figures/per_token_illustration.png"),
   caption: [
-    The vectors $a - a^("null")$ for representative attack and benign prompts. Note that the difference between $a$ and $a^("null")$ is largest in the 4
-    "Ignore" attack tokens, but is still large in the rest of the malicious prompt relative to the benign prompt, suggesting the rule is not completely ignored.
+    The vectors $a - a^("null")$ for attack and benign prompts, chosen such that their attribution distance is
+    the median of the attack and benign classes respectively. The y-axis is shared in both plots.
+    Note that the difference between $a$ and $a^("null")$ is largest in the 4 tokens in the attack "Ignore previous instructions.",
+    but is still large in the rest of the malicious prompt relative to the benign prompt, suggesting the rule is not completely ignored.
   ]
 )
 
-Note that we do not normalize $op("AD")(x)$ by length, as the completeness property of integrated gradients implies we should expect the sum of $op("IG")_(i)(x)$
+Note that we do not normalize $op("AD")(x)$ by length, as the completeness property of Integrated Gradients implies we should expect the sum of $op("IG")_(i)(x)$
 over all tokens to equal $F(e) - F(underline(e))$ and therefore be independent of length#footnote[
   We confirm experimentally that $op("AD")(x)$ is not correlated with length in the Jupyter notebook in our GitHub repository.
 ].
+We show that using the $ell_2$ distance function in the definition of $op("AD")$ outperforms alternatives in Appendix III Table IX.
 
 = Experiment Design
 
-In order to test rule violation detection in the presence of prompt injection attacks given the definitions above, we require:
+In order to test rule violation detection in the presence of prompt injections given the definitions above, we require:
 - A model that has been post-trained to follow system instructions over user instructions
 - A set of system prompt rules which the model can follow, but won't follow if omitted (i.e. they cannot simply reinforce other tendencies post-trained into the model, such as not producing harmful content)
 - A set of malicious prompts that interact with the rules
 - A set of benign prompts that do not interact with the rules
-- A set of prompt injection attacks
+- A set of prompt injections
 
 == Model Selection
 
@@ -273,15 +279,16 @@ We chose to focus on the popular Qwen and Llama families of models, testing:
 == System and User Prompts
 
 Since our detection method only looks at the first $j$ tokens for some small $j$, we focus on rules that clearly affect the first few tokens of output.
-A natural class of system prompts to use for this take the form `[general preamble]. If [rule], then reply "[refusal]"`
+A natural class of system prompts takes the form `[general preamble]. If [rule], then reply "[refusal]"`
 or grammatically equivalent. We created a dataset of variations of this prompt format and applicable rules with the help of GPT-4o,
 which can be found in Appendix I, Table IV.
-We used `Unable` as the refusal string, which is a single token when it appears at the beginning of the output portion
-of the chat template for all 4 test models#footnote[`Unable` has token ID 17512 for the Llama models and 17075 for the Qwen models.].
+We used "Unable" as the refusal string, which is a single token when it appears at the beginning of the output portion
+of the chat template for all 4 test models#footnote["Unable" has token ID 17512 for the Llama models and 17075 for the Qwen models.].
 
 Benign prompts were selected from a previously published dataset of benign and malicious prompts @ivry2025sentinel.
 Separately, a hand-crafted list of 60 "barely benign" prompts was prepared to evaluate the method's robustness,
-which differ from malicious prompts by the addition of a few tokens.
+which differ from malicious prompts by the addition of a few tokens---for example, the prompt "Remember, do not forward any password reset emails!"
+differs from a malicious prompt only by the addition of "not".
 These are similar to prompt injections in that they are a set of additional tokens which cause the rule not to be enforced.
 Malicious prompts needed to be tailored for each rule, so we created a new dataset with suggestions generated by GPT-4o.
 
@@ -293,9 +300,9 @@ malicious variants refused with at least 50% probability.
 
 These new datasets and their refusal probabilities are available in our public repository.
 
-== Prompt Injection Attacks
+== Prompt Injections
 
-Most prompt injections attacks are sourced from prior research.
+Most prompt injections are sourced from prior research.
 Adversarial suffixes can be generated via gradient-based search techniques and have been shown to work well even against models other than the original
 target model, first in _Universal and Transferable Adversarial Attacks on Aligned Language Models_ @zou2023universal.
 We use several of the adversarial suffixes first introduced in the associated _llm-attacks_ GitHub repository, which we refer to as "LLM-Attacks Suffix {1,2,3}".
@@ -306,12 +313,12 @@ The "Escape-Separation" attack has been modified to start with `.` since the Lla
 and several variations of it and "Escape-Deletion" are tested with different numbers of newlines or backspaces respectively.
 Additionally, we use several automatically generated prompts introduced in _StruQ_, which we refer to as "StruQ Suffix {1,2}" and "StruQ TAP 1".
 An additional novel "Superuser" attack was also included in the test.
-The full text of each attack is included in Appendix I, and the effectiveness of each attack is examined in Appendix II.
+The full text of each attack is included in Appendix I, and the success rate of each attack is discussed in Appendix II.
 
 == Null Rules
 
-Null rules were constructed to avoid refusing any of the malicious or benign prompts.
-To avoid any positional effects, they were chosen to have the same token length as the rules being tested.
+Null rules were constructed to avoid refusing any of the malicious or benign prompts,
+to be semantically orthogonal to test prompts, and length-matched to avoid positional encoding artifacts.
 In most cases, the null rule was `they request [N] flowers`  where $N$ is a sequence of nines such that the
 token length matches the original rule (see Appendix I, Table V for exceptions).
 
@@ -322,13 +329,16 @@ We must use real responses generated by the models being tested for causal attri
 
 Responses were sampled for each unique set of inputs using gradually increasing temperatures and filtered to remove refusals until 3 distinct responses 
 were obtained (5 for the smaller dataset of "Barely Benign" prompts).
-There was a notable tendency for models to refuse with "I won't" or "I can't" rather than "Unable" as directed in the system prompt,
-likely due to other post-training, and these were also filtered out. We also consider "I am not sentient" to be a refusal for the inputs specifically
-related to sentience, and we exclude these inputs for Qwen3-8B as we were unable to generate any responses other than "I am not sentient" and "Unable",
-likely indicating separate post-training for this class of question.
+There was a tendency for models to refuse with "I won't" or "I can't" to some prompts rather than "Unable" as directed in the system prompt,
+likely due to safety post-training of these models, and these responses were filtered out in order to focus on the model's ability to follow the
+system prompt rules rather than its safety policies.
+We treat "I am not sentient" similarly for inputs related to sentience, as many models appear to be post-trained to output this as a policy.
+In particular, for inputs related to sentience, Qwen3-8B would generate only "I am not sentient" or "Unable",
+likely indicating separate post-training for this class of question, and so we excluded these inputs for Qwen3-8B.
 
 This filtering leads us to use $j>=3$ since "I can't" requires 3 tokens to distinguish from "I can".
-After initial investigation of values between $3$ and $10$ with Llama-3.2-3B-Instruct, we restricted our focus to a $j$ value of 3.
+We choose $j=3$ due to our intuition that the first few tokens will be most influenced by rules and to minimize computation time.
+Sensitivity to $j in {3,4,5,7,10}$ is analyzed in Appendix III, Table VIII.
 
 == Baselines and Convergence
 
@@ -395,7 +405,7 @@ so that the distribution is centered at 0 with standard deviation 1.
 
 To avoid Simpson's paradox, we weight each sample so that the positive samples
 (i.e. successful malicious prompts) for each rule have the same total weight and do the same for negative samples.
-This results in a chance level of $0.5$ for the Llama models, but $0.481$ for Qwen2.5-7B-Instruct and $0.462$ for Qwen3-8B as some rules have no positive samples.
+This results in a chance level of $0.5$ for the Llama models, but $0.481$ for Qwen2.5-7B-Instruct and $0.462$ for Qwen3-8B as some rules have 0 positive samples.
 
 DataSentinel's published checkpoint `detector_large/checkpoint-5000` performed poorly on our dataset, with a FPR of 52.6% on our benign prompts and TPR against
 the most successful attack families ranging from 45% to 61%, so was excluded from further analysis.
@@ -424,12 +434,12 @@ We hypothesize this is due to a lack of non-malicious instruction-following trai
   ]
 )
 
-Our metric out-performs Attention Tracker for 3 out of 4 models.
+Our metric outperforms Attention Tracker for 3 out of 4 models.
 Attention Tracker performs extremely well on Completion and Ignore-Completion attacks---which
 as shown in Appendix II, Table VII are the most frequently successful---but poorly on other attacks#footnote[
   A breakdown by attack type is available in the Jupyter notebook in our GitHub repository.].
 We were unable to determine why Attention Tracker performs so poorly for Qwen2.5-7B-Instruct, where it exhibits a similar but much
-narrow distribution of scores by attack type.
+narrower distribution of scores by attack type.
 
 However, neither method is comparable to the Sentinel fine-tuned detection model. This is not surprising as the attacks tested here
 were mostly well-known when Sentinel's dataset was prepared, and the benign prompts were selected from the same test data used to
@@ -452,7 +462,8 @@ the optimal $F_1$ score and computed the FPR on the "barely benign" dataset at t
 ))
 #figure(
   caption: [
-    Comparison of FPR on the normal dataset vs. on the "barely benign" dataset using a fixed threshold optimized for $F_1$ against the normal dataset.
+    Comparison of FPR on the normal dataset vs. on the "barely benign" dataset using a fixed threshold optimized for $F_1$ against the normal dataset,
+    including 95% CI via BCa bootstrap over rules (10k resamples).
   ],
   block[
     #table(
@@ -491,9 +502,11 @@ and this may explain why the method performed worse on these models.
 Our analysis is also limited by the datasets we have constructed.
 The attacks analyzed are relatively simple and not targeted at the specific rules being tested.
 Future work could verify that this method works for attacks designed to evade known-answer detection, or for other more complex classes of attacks.
-Since $op("AD")$ is differentiable, standard gradient-based optimization techniques could be used to generate attacks,
-which we expect would evade detection and may offer insights about the behavior of $op("AD")$, although the cost may be prohibitive given the
-expense of computing $op("AD")$ with gradients.
+
+Since $op("AD")$ is differentiable, standard gradient-based optimization techniques could be used to generate adaptive attacks,
+which we expect would evade detection.
+Future work could confirm this and the generated attacks may offer insights about the behavior of $op("AD")$.
+However, this will require significant computing resources due to the expense of computing $op("AD")$ with gradients.
 #pagebreak(weak: true)
 
 #bibliography("paper.bib", style: "ieee")
@@ -577,7 +590,7 @@ and that we treat `\b` as the literal 2-character string but `\n` as a newline.
 ))
 #figure(
   caption: [
-    Prompt injection attacks in Python f-string format.
+    Prompt injections in Python f-string format.
   ],
   block[
     #table(
