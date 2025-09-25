@@ -7,7 +7,7 @@
   index-terms: (
     "Prompt injection",
     "Integrated Gradients (IG)",
-    "Safety policy compliance",
+    "Policy compliance",
     "Training-free detection",
   ),
   paper-size: "us-letter",
@@ -122,7 +122,7 @@ This means we consider not only the user input but the generated response, since
 = Related Work
 
 Broadly speaking, prior work on prompt injection defenses can be divided into detection, model hardening, and capability-based isolation.
-We briefly survey these approaches and discuss how applicable they are to our to our scenario.
+We briefly survey these approaches and discuss how applicable they are to our scenario.
 
 == Detection
 
@@ -133,7 +133,7 @@ However, we will see in our analysis that this does not necessarily transfer whe
 Most defenses leverage off-the-shelf text-classification models.  
 An early example is *LLM Guard-v2*, which fine-tunes DeBERTa-v3 on a composite dataset of known attacks and benign prompts
 and reports $F_1 approx 0.95$ on its held-out split @llmguardv2.
-*Sentinel* fine-tunes a ModernBERT-large classifier on a more diverse corpus, reporting achieving nearly 100% accuracy on older benchmarks
+*Sentinel* fine-tunes a ModernBERT-large classifier on a more diverse corpus, reporting nearly 100% accuracy on older benchmarks
 and $F_1 approx 0.98$ on its unseen test set @ivry2025sentinel.
 *DataSentinel* achieves similar benchmark results but better robustness against adaptive attacks by formulating detection as a minimax game
 against adaptive attackers, alternating gradient-based attack generation with detector training @liu2025datasentinel.
@@ -144,7 +144,7 @@ Averaging attention across these heads to detect prompt injection outperforms Pr
 but is vulnerable to adversarial methods @hung2025attention.
 Although this approach is training-free, it still requires calibration using a small set of known attacks to identify important attention heads.
 
-There is also prior work for using gradients to detect safety policy violations, which is similar to our work though not focused specifically on prompt injections.
+There is also prior work for using gradients to detect safety policy violations, which is similar our work though not focused specifically on prompt injections.
 *GradSafe* computes the cosine similarity between the gradient of "safety-critical" parameters and a reference vector @xie2024gradsafe.
 *Gradient Cuff* considers the gradient of the probability of a refusal response @hu2024gradientcuff-neurips.
 *Token Highlighter* builds on this concept by identifying the tokens with the largest such gradient and "soft removing" other tokens by scaling the embeddings
@@ -236,8 +236,8 @@ We define the *attribution distance* with output length $j$ as $op("AD")(x) = no
   placement: top,
   image("figures/per_token_illustration.png"),
   caption: [
-    The vectors $a - a^("null")$ for representative attack and benign prompts. Note that the difference between $a$ and $a^("null")$ is largest in the attack itself,
-    but is still larger in the rest of the malicious prompt, suggesting the rule is still having some effect.
+    The vectors $a - a^("null")$ for representative attack and benign prompts. Note that the difference between $a$ and $a^("null")$ is largest in the 4
+    "Ignore" attack tokens, but is still large in the rest of the malicious prompt relative to the benign prompt, suggesting the rule is not completely ignored.
   ]
 )
 
@@ -245,7 +245,6 @@ Note that we do not normalize $op("AD")(x)$ by length, as the completeness prope
 over all tokens to equal $F(e) - F(underline(e))$ and therefore be independent of length#footnote[
   We confirm experimentally that $op("AD")(x)$ is not correlated with length in the Jupyter notebook in our GitHub repository.
 ].
-
 
 = Experiment Design
 
@@ -277,7 +276,7 @@ Since our detection method only looks at the first $j$ tokens for some small $j$
 A natural class of system prompts to use for this take the form `[general preamble]. If [rule], then reply "[refusal]"`
 or grammatically equivalent. We created a dataset of variations of this prompt format and applicable rules with the help of GPT-4o,
 which can be found in Appendix I, Table IV.
-We used "Unable" as the refusal string, which is a single token when it appears at the beginning of the output portion
+We used `Unable` as the refusal string, which is a single token when it appears at the beginning of the output portion
 of the chat template for all 4 test models#footnote[`Unable` has token ID 17512 for the Llama models and 17075 for the Qwen models.].
 
 Benign prompts were selected from a previously published dataset of benign and malicious prompts @ivry2025sentinel.
@@ -376,8 +375,8 @@ $n=384$ for Qwen2.5-7B-Instruct and $n=192$ for Qwen3-8B.
 
 == Comparison with Existing Methods
 
-We chose to compare our performance to 2 SoTA detection models, Sentinel and DataSentinel, as well as the unique training-free detection method Attention Tracker.
-Each of these methods produces a numeric score similar to $op("AD")$.
+We chose to compare our performance to 2 state-of-the-art detection models, Sentinel and DataSentinel, as well as the unique training-free detection method
+Attention Tracker. Each of these methods produces a numeric score similar to $op("AD")$.
 
 In order to compare Attention Tracker to our results, which use more recent models, we use their public code to select the relevant attention heads.
 Heads selected by their "llm" calibration dataset with $sigma = 3$ or $sigma = 4$ as used in their evaluations performed poorly on our evaluations,
@@ -398,8 +397,9 @@ To avoid Simpson's paradox, we weight each sample so that the positive samples
 (i.e. successful malicious prompts) for each rule have the same total weight and do the same for negative samples.
 This results in a chance level of $0.5$ for the Llama models, but $0.481$ for Qwen2.5-7B-Instruct and $0.462$ for Qwen3-8B as some rules have no positive samples.
 
-DataSentinel performed poorly on our dataset, with a FPR of 52.6% on our benign prompts and TPR against the most successful attack families ranging from 45% to 61%,
-so was excluded from further analysis. We hypothesize this is due to a lack of non-malicious instruction-following training data.
+DataSentinel's published checkpoint `detector_large/checkpoint-5000` performed poorly on our dataset, with a FPR of 52.6% on our benign prompts and TPR against
+the most successful attack families ranging from 45% to 61%, so was excluded from further analysis.
+We hypothesize this is due to a lack of non-malicious instruction-following training data.
 
 #let rows = csv("tables/average_precision_comparison.csv").slice(1)
 #let rows = rows.map(r => (
@@ -482,6 +482,7 @@ However, this method is still potentially useful in offline or latency-insensiti
 which fine-tuned models cannot be expected to catch.
 
 Several potential avenues of improvement could be explored.
+The per-token attributions could be expanded to look at the interactions between multiple tokens.
 Many alternative loss functions could be substituted in place of the contrastive entropy of the first $j$ tokens in the definition of $op("AD")$.
 The choice of baseline $underline(e)$ is also simplistic and could likely be optimized.
 This appears to have been a particularly poor choice for the Qwen models, which required more steps to converge,
@@ -499,13 +500,15 @@ expense of computing $op("AD")$ with gradients.
 
 #pagebreak(weak: true)
 
-#counter(heading).update(0)    // restart the chapter counter
-#show heading.where(level: 1): set heading(
-  numbering: n => "Appendix " + str(n) + "."  // prints “Appendix 1.”, “Appendix 2.”, …
-)
 #show figure.where(kind: table): set block(breakable: true)
 
-= Prompts & Attacks
+#let appx(title, n) = {
+  heading(level: 1, numbering: none)[
+    Appendix #numbering("I", n). #title
+  ]
+}
+
+#appx([Prompts & Attacks], 1)
 
 All system prompts were assembled by creating a system prompt template to enforce that rule and then rendering one or more rules into this template.
 User inputs were used verbatim as user prompts except for the email system prompt template (where they were prefixed with `Email: `), the tutoring template
@@ -586,7 +589,7 @@ and that we treat `\b` as the literal 2-character string but `\n` as a newline.
   ]
 )
 
-= Attack Success Rates
+#appx([Attack Success Rates], 2)
 
 Not all attacks are effective against all models.
 To evaluate effectiveness, we first baseline $p("Unable")$ for malicious prompts on each model, and then define $Delta p("Unable")$
@@ -612,7 +615,7 @@ Note $N$ varies slightly within the same model because we are not always able to
   ],
   block[
     #table(
-      columns: (auto, 8em, 2.5em, 7em, 7em),
+      columns: (auto, 7.5em, 2.5em, 7em, 7em),
       align: (left, left, right, right, right),
       table.header[*Model*][*Attack*][*N*][*$Delta p("Unable")$*][*95% CI*],
       ..vmerge(rows),
@@ -623,7 +626,7 @@ Note $N$ varies slightly within the same model because we are not always able to
 The Llama models are vulnerable to a much larger subset of the attacks tested than the Qwen models, which may limit the applicability
 of our analysis to the Qwen models.
 
-= Ablations
+#appx([Ablations], 3)
 
 == Response Length (j)
 
@@ -652,7 +655,7 @@ In addition to $j=3$, we tested $j={4,5,7,10}$ using Llama-3.1-8B-Instruct due t
 == Distance Function
 
 In addition to the $ell_2$ (Euclidean) distance, we tested defining $op("AD")$ using $ell_1$, $ell_infinity$ and cosine distance.
-We found Euclidean distance outperforms other $ell_p$ distances for all models and cosine for 3 out of 4 models.
+We found Euclidean distance outperforms other $ell_p$ distances for all models and cosine distance for 3 out of 4 models.
 Cosine distance makes less theoretical sense because the magnitude of the attributions matters.
 
 #let rows = csv("tables/attribution_distance_average_precision.csv").slice(1)
